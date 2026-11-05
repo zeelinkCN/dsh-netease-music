@@ -919,6 +919,7 @@ window.__ModuleLoader__.load({
           next(true)
         })
         on('error', () => {
+          const code = audio && audio.error ? audio.error.code : 'x'
           if (!audio || !state.current) return
           patch({ error: 'playback', playing: false, loading: false })
         })
@@ -2245,7 +2246,11 @@ window.__ModuleLoader__.load({
             },
           }))
           try {
+            try {
             player.playQueue(songs, 0, (data && data.title) || t(mode.title))
+          } catch (playErr) {
+            throw playErr
+          }
           } catch (err) {
             const message = (err && err.message) || t('toast.modeError')
             if (props.onToast) props.onToast(message)
@@ -2317,8 +2322,8 @@ window.__ModuleLoader__.load({
               const modeKey = card.getAttribute('data-mode')
               const targetMode = HERO_MODES.filter((item) => item.key === modeKey)[0]
               if (targetMode) {
-                suppressNextClick()
                 playMode(targetMode)
+                suppressNextClick()
               }
             }
           } catch (err) {

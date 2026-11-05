@@ -694,6 +694,35 @@ export function apply(ctx) {
         }),
       ),
       /* 听歌模式：心动 / 漫游 / 相似歌曲 / 相似艺人 / 每日推荐（首页轮播用） */
+      /* 歌曲收藏（红心）：查询批量状态 / 设置 */
+      route(
+        'like/status',
+        handle((url) => {
+          const raw = String(url.searchParams.get('ids') || '')
+          const ids = raw
+            .split(',')
+            .map((v) => Number(v.trim()))
+            .filter((v) => Number.isFinite(v) && v > 0)
+            .slice(0, 50)
+          if (!ids.length) throw new PluginError('缺少歌曲 id', 'NOT_FOUND')
+          const key = `like:${ids.slice().sort((a, b) => a - b).join(',')}`
+          return cache.wrap(key, 30 * 1000, () => bridge.call('like_status', { ids }, { timeoutMs: 20_000 }))
+        }),
+      ),
+      route(
+        'like',
+        handle(async (url, req) => {
+          if (req.method && req.method !== 'POST') throw new PluginError('请用 POST 收藏歌曲', 'INTERNAL')
+          const body = await readJson(req)
+          const id = num(body && body.id)
+          if (!id) throw new PluginError('缺少歌曲 id', 'NOT_FOUND')
+          const like = body.like !== false
+          const data = await bridge.call('like_set', { id, like }, { timeoutMs: 20_000 })
+          cache.clear()
+          return { ok: true, liked: !!(data && data.liked !== undefined ? data.liked : like) }
+        }),
+      ),
+
       route(
         'mode',
         handle((url) => {
