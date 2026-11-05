@@ -383,7 +383,7 @@ async function readProgress() {
       const av = target.getAttribute('aria-valuetext')
       if (av) { const m = av.match(/(\\d{1,2}):(\\d{2})/); if (m) out.seconds = (+m[1]) * 60 + (+m[2]) }
     }
-    const box = root || document.querySelector('[data-nm="player"]')
+    const box = root || document.querySelector('[data-nm="dock"]') || document.querySelector('[data-nm="player"]')
     out.text = box ? box.textContent : ''
     out.timeList = [...out.text.matchAll(/(\\d{1,2}):(\\d{2})/g)].map((m) => (+m[1]) * 60 + (+m[2]))
     const a = document.querySelector('audio')
@@ -439,16 +439,20 @@ try {
   check('client.js 调用了 __ModuleLoader__.load', await evaluate('!!window.__plugin'))
   check('main slot 注册成功', await evaluate('!!window.__slots.main'))
   check('sidebar.panellist slot 注册成功', await evaluate('!!window.__slots["sidebar.panellist"]'))
-  check('shell.overlay slot 注册成功', await evaluate('!!window.__slots["shell.overlay"]'))
+  check('sidebar.footer.action slot 注册成功', await evaluate('!!window.__slots["sidebar.footer.action"]'))
+  check('v3 不再注册 shell.bottom', !(await evaluate('!!window.__slots["shell.bottom"]')))
+  check('v3 不再注册 shell.overlay', !(await evaluate('!!window.__slots["shell.overlay"]')))
   const specs = await evaluate('window.__slotSpecs')
   check('main spec.key = netease-music', specs?.main?.key === 'netease-music', JSON.stringify(specs?.main))
   check('sidebar.panellist spec.id = netease-music', specs?.['sidebar.panellist']?.id === 'netease-music',
     JSON.stringify(specs?.['sidebar.panellist']))
-  check('shell.overlay spec.id = netease-music-player', specs?.['shell.overlay']?.id === 'netease-music-player',
-    JSON.stringify(specs?.['shell.overlay']))
+  check('sidebar.footer.action spec.id = netease-mini', specs?.['sidebar.footer.action']?.id === 'netease-mini',
+    JSON.stringify(specs?.['sidebar.footer.action']))
   check('sidebar.panellist spec.order = 30', specs?.['sidebar.panellist']?.order === 30,
     JSON.stringify(specs?.['sidebar.panellist']))
-  check('无当前曲目时播放条不渲染（无占位）', !(await evaluate(`!!document.querySelector('[data-nm="player"]')`)))
+  check('sidebar.footer.action spec.order = 10', specs?.['sidebar.footer.action']?.order === 10,
+    JSON.stringify(specs?.['sidebar.footer.action']))
+  check('无当前曲目时播放条不渲染（无占位）', !(await evaluate(`!!document.querySelector('[data-nm="dock"], [data-nm="player"]')`)))
   const sidebarIcon = await evaluate(`(() => {
     const img = document.querySelector('#sidebar-icon img.nm-panel-icon') || document.querySelector('[data-nm="panellist-icon"] img') || document.querySelector('#sidebar-icon img')
     if (!img) return null
@@ -475,7 +479,7 @@ try {
 
   // 三个 slot 组件本身应该是函数/组件
   check('main 是 React 组件', await evaluate(`typeof window.__slots.main === 'function'`))
-  check('PlayerDock 是 React 组件', await evaluate(`typeof window.__slots['shell.overlay'] === 'function'`))
+  check('MiniPlayer 是 React 组件', await evaluate(`typeof window.__slots['sidebar.footer.action'] === 'function'`))
   check('PanelIcon 是 React 组件', await evaluate(`typeof window.__slots['sidebar.panellist'] === 'function'`))
 
   await waitFor(`!!document.querySelector('[data-nm="root"]')`, 'Page 根节点 data-nm="root"')
@@ -584,7 +588,7 @@ try {
   console.log('\n[3] 播放：播放全部 → 播放条出现 → 播放中 → 进度前进 → 下一首 → 暂停')
   check('点击「播放全部」', await clickSel('[data-nm="play-all"]'))
   try {
-    await waitFor(`!!document.querySelector('[data-nm="player"]')`, 'player dock', 8000)
+    await waitFor(`!!document.querySelector('[data-nm="dock"], [data-nm="player"]')`, 'in-panel dock', 8000)
     check('播放条 data-nm="player" 出现', true)
   } catch (err) {
     check('播放条 data-nm="player" 出现', false, '点击播放全部后 8s 内无播放条')
@@ -592,7 +596,7 @@ try {
   }
   try {
     await waitFor(`(() => {
-      const el = document.querySelector('[data-nm="player-state"]') || document.querySelector('[data-nm="player"]')
+      const el = document.querySelector('[data-nm="player-state"]') || document.querySelector('[data-nm="dock"][data-playing]') || document.querySelector('[data-nm="player"]')
       return el && el.getAttribute('data-playing') === 'true'
     })()`, 'player playing', 8000)
     check('播放条 data-playing="true"', true)
@@ -649,7 +653,7 @@ try {
   check('点击暂停', await clickSel('[data-nm="player-toggle"]'))
   try {
     await waitFor(`(() => {
-      const el = document.querySelector('[data-nm="player-state"]') || document.querySelector('[data-nm="player"]')
+      const el = document.querySelector('[data-nm="player-state"]') || document.querySelector('[data-nm="dock"][data-playing]') || document.querySelector('[data-nm="player"]')
       return el && el.getAttribute('data-playing') === 'false'
     })()`, 'paused', 6000)
     check('暂停后 data-playing="false"', true)
@@ -682,7 +686,7 @@ try {
   check('点击今日推荐曲目行', await clickSel('[data-nm="section"][data-section="daily"] [data-nm="track"]'))
   try {
     await waitFor(`(() => {
-      const el = document.querySelector('[data-nm="player-state"]') || document.querySelector('[data-nm="player"]')
+      const el = document.querySelector('[data-nm="player-state"]') || document.querySelector('[data-nm="dock"][data-playing]') || document.querySelector('[data-nm="player"]')
       return el && el.getAttribute('data-playing') === 'true'
     })()`, 'play by row click', 8000)
     check('曲目行点击后恢复播放（播放整列表）', true, `before=${(beforeRow || '').slice(0, 24)}`)
@@ -983,55 +987,140 @@ try {
     check('引擎恢复后首页重新渲染', false, 'bridge 恢复 ready 并刷新后 15s 内未恢复')
   }
 
-  console.log('\n[9] v2：shell.bottom 停靠 / 全屏播放页 / 黑胶 / 歌词 / 音质 / logo')
+  console.log('\n[7c] v3：引擎无感安装（POST /setup/install + /setup/install/log）')
+  await config({ bridge: 'ready', engine: 'missing', installError: false, errorMode: null })
+  await reload()
+  try {
+    await waitFor(`!!document.querySelector('[data-nm="engine-setup"]') || !!document.querySelector('[data-nm="engine-progress"]')`, 'engine setup ui', 15000)
+    check('引擎缺失时出现安装 UI', true)
+  } catch (err) {
+    check('引擎缺失时出现安装 UI', false, '15s 内未出现 engine-setup / engine-progress')
+  }
+  const setupText = (await textOf('[data-nm="engine-setup"]')) || (await textOf('[data-nm="root"]')) || ''
+  check('安装 UI 文案包含「引擎/安装」', /引擎|安装/.test(setupText), setupText.slice(0, 80))
+  const running0 = await evaluate(`!!document.querySelector('[data-nm="engine-progress"]') || !!document.querySelector('[data-nm="engine-log"]')`)
+  if (!running0) {
+    check('有「安装引擎」按钮 [data-nm="engine-install"]',
+      await evaluate(`!!document.querySelector('[data-nm="engine-install"]')`))
+    if (await clickSel('[data-nm="engine-install"]')) await sleep(700)
+  }
+  try {
+    await waitFor(`!!document.querySelector('[data-nm="engine-progress"]') || !!document.querySelector('[data-nm="engine-log"]')`, 'engine install running', 10000)
+    check('安装中显示进度条/日志', true)
+  } catch (err) {
+    check('安装中显示进度条/日志', false, '10s 内未出现 engine-progress/engine-log')
+  }
+  await S('22-install-progress.png')
+  try {
+    await waitFor(`(async () => {
+      if (document.querySelector('[data-nm="engine-setup"]') || document.querySelector('[data-nm="engine-progress"]')) return false
+      if (!document.querySelector('[data-nm="hero"]') && document.querySelectorAll('[data-nm="track"]').length < 10) return false
+      const body = await fetch('/netease-panel/api/status').then(function (r) { return r.json() })
+      return !!(body && body.data && body.data.engine === 'installed')
+    })()`, 'engine installed home', 28000)
+    check('安装完成后卡片消失并自动渲染首页', true)
+    await S('23-engine-installed.png')
+  } catch (err) {
+    check('安装完成后卡片消失并自动渲染首页', false, '28s 内未恢复首页（mock 安装 3.2s 完成）')
+  }
+  const statusEngine = await evaluate(`fetch('/netease-panel/api/status').then(function (r) { return r.json() }).then(function (j) { return j && j.data && j.data.engine })`)
+  check('/status.engine = installed', statusEngine === 'installed', String(statusEngine))
+
+  // 失败态
+  await config({ engine: 'missing', installError: true })
+  await reload()
+  try {
+    await waitFor(`!!document.querySelector('[data-nm="engine-setup"]') || !!document.querySelector('[data-nm="engine-progress"]')`, 'engine setup fail', 15000)
+  } catch { /* 下面断言暴露 */ }
+  const running1 = await evaluate(`!!document.querySelector('[data-nm="engine-progress"]') || !!document.querySelector('[data-nm="engine-log"]')`)
+  if (!running1) {
+    if (await clickSel('[data-nm="engine-install"]')) await sleep(600)
+  }
+  try {
+    await waitFor(`!!document.querySelector('[data-nm="engine-retry"]') || (!!document.querySelector('[data-nm="engine-setup"]') && /失败|错误|重试/.test((document.querySelector('[data-nm="engine-setup"]') || {}).textContent || ''))`, 'engine install failed', 20000)
+    check('安装失败显示错误 + 重试 [data-nm="engine-retry"]', true)
+    const failText = (await textOf('[data-nm="engine-setup"]')) || (await textOf('[data-nm="root"]')) || ''
+    check('失败文案包含可读原因', /失败|错误|网络|超时|重试/.test(failText), failText.slice(0, 80))
+  } catch (err) {
+    check('安装失败显示错误 + 重试 [data-nm="engine-retry"]', false, '20s 内未见失败态/重试按钮')
+  }
+  await config({ engine: 'installed', installError: false })
+  await reload()
+  try {
+    await waitFor(`!!document.querySelector('[data-nm="hero"]') || document.querySelectorAll('[data-nm="track"]').length > 0`, 'recover after install test', 15000)
+    check('正常引擎状态下首页恢复渲染', true)
+  } catch (err) {
+    check('正常引擎状态下首页恢复渲染', false, '15s 内未恢复')
+  }
+
+  console.log('\n[9] v3：面板内 dock / 全屏播放页 / 黑胶圆形 / 歌词 / 音质')
   await setTheme('dark')
   await setViewport(1440, 980)
-  await sleep(300)
+  await evaluate(`window.__setActivePanel('netease-music')`)
+  await sleep(400)
   if (await evaluate(`!!document.querySelector('[data-nm="tab"][data-tab="recommend"]')`)) {
     await clickSel('[data-nm="tab"][data-tab="recommend"]')
     await sleep(250)
   }
   if (!(await playerVisible())) {
     if (await clickSel('[data-nm="play-all"]')) {
-      try { await waitFor(`!!document.querySelector('[data-nm="dock"], [data-nm="player"]')`, 'dock after play-all', 8000) } catch { /* 下面断言暴露 */ }
+      try { await waitFor(`!!document.querySelector('[data-nm="dock"], [data-nm="player"]')`, 'in-panel dock after play-all', 8000) } catch { /* 下面断言暴露 */ }
     }
   }
-  await sleep(600)
+  await sleep(700)
+  const slotInfo = await evaluate(`({
+    bottom: !!window.__slots['shell.bottom'],
+    overlay: !!window.__slots['shell.overlay'],
+    footer: !!window.__slots['sidebar.footer.action'],
+    footerSpec: window.__slotSpecs['sidebar.footer.action'] || null,
+    activePanel: window.__activePanelId,
+    miniWide: !!window.__miniWide,
+  })`)
+  check('客户端不再注册 shell.bottom', slotInfo.bottom === false, JSON.stringify(slotInfo))
+  check('客户端不再注册 shell.overlay', slotInfo.overlay === false, JSON.stringify(slotInfo))
+  check('注册了 sidebar.footer.action（mini player）', slotInfo.footer === true, JSON.stringify(slotInfo))
+  check('mini spec: name/id/order 正确',
+    !!slotInfo.footerSpec && slotInfo.footerSpec.name === 'sidebar.footer.action' &&
+    slotInfo.footerSpec.id === 'netease-mini' && slotInfo.footerSpec.order === 10,
+    JSON.stringify(slotInfo.footerSpec))
+  check('当前激活面板 = netease-music', slotInfo.activePanel === 'netease-music', slotInfo.activePanel)
+
   const dockLayout = await evaluate(`(() => {
-    const dock = document.querySelector('[data-nm="dock"]') || document.querySelector('[data-nm="player"]')
-    const bottom = document.querySelector('#bottom-root')
-    const rootEl = document.querySelector('#root')
+    const root = document.querySelector('[data-nm="root"]')
+    const scroll = document.querySelector('[data-nm="scroll"]')
+    const dock = document.querySelector('[data-nm="dock"]')
     const composer = document.querySelector('#composer')
-    const bodyEl = document.querySelector('#body')
-    const appEl = document.querySelector('#app')
     const dockRect = dock ? dock.getBoundingClientRect() : null
+    const scrollRect = scroll ? scroll.getBoundingClientRect() : null
+    const rootRect = root ? root.getBoundingClientRect() : null
     const composerRect = composer ? composer.getBoundingClientRect() : null
-    const bodyRect = bodyEl ? bodyEl.getBoundingClientRect() : null
     return {
       dockFound: !!dock,
-      dataDock: dock ? dock.getAttribute('data-dock') : null,
-      inBottomSlot: !!(bottom && dock && bottom.contains(dock)),
-      slotRender: window.__slotRender || null,
-      bottomH: bottom ? bottom.offsetHeight : -1,
-      composerH: composer ? composer.offsetHeight : -1,
-      rootH: rootEl ? rootEl.clientHeight : -1,
-      bodyH: bodyEl ? bodyEl.clientHeight : -1,
-      appH: appEl ? appEl.clientHeight : -1,
+      inRoot: !!(root && dock && root.contains(dock)),
+      dockPosition: dock ? getComputedStyle(dock).position : null,
       dockTop: dockRect ? Math.round(dockRect.top) : -1,
+      dockH: dockRect ? Math.round(dockRect.height) : -1,
       dockBottom: dockRect ? Math.round(dockRect.bottom) : -1,
+      scrollBottom: scrollRect ? Math.round(scrollRect.bottom) : -1,
+      scrollPadBottom: scroll ? (parseFloat(getComputedStyle(scroll).paddingBottom) || 0) : -1,
+      rootTop: rootRect ? Math.round(rootRect.top) : -1,
+      rootBottom: rootRect ? Math.round(rootRect.bottom) : -1,
+      composerTop: composerRect ? Math.round(composerRect.top) : -1,
       composerBottom: composerRect ? Math.round(composerRect.bottom) : -1,
-      bodyBottom: bodyRect ? Math.round(bodyRect.bottom) : -1,
+      hasScroll: !!scroll,
     }
   })()`)
-  check('dock 注册在 shell.bottom 槽', !!dockLayout.slotRender && dockLayout.slotRender.bottom === true && dockLayout.inBottomSlot, JSON.stringify(dockLayout))
-  check('dock 根 data-nm="dock" 且 data-dock="bottom"',
-    dockLayout.dockFound && dockLayout.dataDock === 'bottom', JSON.stringify(dockLayout))
-  check('底部停靠不遮挡输入框（dock.top ≥ composer.bottom-1）',
-    dockLayout.dockTop >= dockLayout.composerBottom - 1, JSON.stringify(dockLayout))
-  check('shell.bottom 占位压缩主区高度（dock 独占一行，主区 = body - dock）',
-    Math.abs(dockLayout.rootH + dockLayout.composerH - dockLayout.bodyH) <= 2 &&
-    Math.abs(dockLayout.bodyH + dockLayout.bottomH - dockLayout.appH) <= 2, JSON.stringify(dockLayout))
-  await S('16-dock-bottom.png')
+  check('面板内 dock 出现在 [data-nm="root"] 内', dockLayout.dockFound && dockLayout.inRoot, JSON.stringify(dockLayout))
+  check('面板内 dock 不是 fixed 全局悬浮', dockLayout.dockPosition !== 'fixed', JSON.stringify(dockLayout))
+  check('面板滚动容器 [data-nm="scroll"] 存在', dockLayout.hasScroll === true, JSON.stringify(dockLayout))
+  check('dock 不覆盖列表（dock.top ≥ 滚动容器 bottom - 2）',
+    dockLayout.dockTop >= dockLayout.scrollBottom - 2, JSON.stringify(dockLayout))
+  check('主内容底部留白 ≈ dock 高度（padding-bottom 或布局行）',
+    dockLayout.scrollPadBottom >= dockLayout.dockH - 2 || dockLayout.dockTop >= dockLayout.scrollBottom - 2,
+    JSON.stringify(dockLayout))
+  check('面板内 dock 在输入框之上、不遮挡（dock.bottom ≤ composer.top + 1）',
+    dockLayout.dockBottom <= dockLayout.composerTop + 1, JSON.stringify(dockLayout))
+  await S('19-inpanel-dock.png')
 
   // 点曲目行 → 全屏播放页
   await scrollTop()
@@ -1079,6 +1168,45 @@ try {
       await waitFor(`!!document.querySelector('[data-nm="np-vinyl"]')`, 'np-vinyl', 6000)
       const v0 = await evaluate(`(() => { const el = document.querySelector('[data-nm="np-vinyl"]'); return el ? { spinning: el.classList.contains('is-spinning'), cls: el.className } : null })()`)
       check('黑胶 [data-nm="np-vinyl"] 播放中带 is-spinning', !!v0 && v0.spinning, JSON.stringify(v0))
+      check('默认 vinyl 模式下 [data-nm="np-lyrics"] 不存在（严格互斥）',
+        !(await evaluate(`!!document.querySelector('[data-nm="np-lyrics"]')`)))
+      const npBg = await evaluate(`(() => {
+        const el = document.querySelector('[data-nm="np-bg"]')
+        if (!el) return null
+        const cs = getComputedStyle(el)
+        const inner = el.querySelector('[style*="background"]')
+        const innerBg = inner ? getComputedStyle(inner).backgroundImage : ''
+        const img = el.querySelector('img') || document.querySelector('[data-nm="np-vinyl"] img')
+        const imgSrc = img ? (img.getAttribute('src') || '') : ''
+        const bgImage = (cs.backgroundImage && cs.backgroundImage !== 'none') ? cs.backgroundImage : innerBg
+        return {
+          exists: true,
+          bgImage: (bgImage || '').slice(0, 100),
+          filter: cs.filter,
+          imgSrc: imgSrc.slice(0, 48),
+          hasUrl: (bgImage || '').indexOf('url(') >= 0,
+          hasDataImage: (bgImage || '').indexOf('data:image') >= 0 || (innerBg || '').indexOf('data:image') >= 0,
+          mentionsCover: !!imgSrc && (bgImage || '').indexOf(imgSrc.slice(0, 32)) >= 0,
+          hasBlur: (cs.filter || '').indexOf('blur(') >= 0 || (getComputedStyle(inner || el).filter || '').indexOf('blur(') >= 0,
+        }
+      })()`)
+      check('播放页背景层 [data-nm="np-bg"] 存在', !!npBg && npBg.exists, JSON.stringify(npBg))
+      check('np-bg 包含当前封面 URL + blur 滤镜',
+        !!npBg && npBg.hasUrl && (npBg.hasDataImage || npBg.mentionsCover) && npBg.hasBlur, JSON.stringify(npBg))
+      const modeBefore = await evaluate(`(() => { const el = document.querySelector('[data-nm="np-mode"]'); return el ? el.getAttribute('data-mode') : null })()`)
+      const playBefore = await playerState()
+      check('点击黑胶盘体', await clickSel('[data-nm="np-vinyl"]'))
+      await sleep(600)
+      const playAfter = await playerState()
+      const modeAfter = await evaluate(`(() => { const el = document.querySelector('[data-nm="np-mode"]'); return el ? el.getAttribute('data-mode') : null })()`)
+      check('点黑胶只切换播放状态（data-playing 翻转）', !!playBefore && !!playAfter && playBefore !== playAfter,
+        JSON.stringify({ playBefore, playAfter }))
+      check('点黑胶后仍是 vinyl 模式（不切歌词）', modeBefore === 'vinyl' && modeAfter === 'vinyl' &&
+        !(await evaluate(`!!document.querySelector('[data-nm="np-lyrics"]')`)), JSON.stringify({ modeBefore, modeAfter }))
+      if (playAfter === 'false') {
+        await clickSel('[data-nm="np-vinyl"]')
+        await sleep(500)
+      }
       await S('13-nowplaying-vinyl-dark.png')
       check('播放页暂停', await clickSel('[data-nm="player-toggle"]'))
       try {
@@ -1120,6 +1248,9 @@ try {
       check('歌词行 ≥5', lyr0.count >= 5, JSON.stringify(lyr0))
       check('恰好一行 lyric-line data-active="true"', lyr0.activeCount === 1, JSON.stringify(lyr0))
       check('np-mode 容器 data-mode="lyrics"', lyr0.mode === 'lyrics', JSON.stringify(lyr0))
+      check('切到歌词后 [data-nm="np-vinyl"] 不存在（严格互斥）',
+        !(await evaluate(`!!document.querySelector('[data-nm="np-vinyl"]')`)))
+      check('歌词模式下背景层仍在', await evaluate(`!!document.querySelector('[data-nm="np-bg"]')`))
       await S('14-nowplaying-lyrics-dark.png')
       const t0 = lyr0.activeTime
       let changed = false
@@ -1156,6 +1287,42 @@ try {
     try {
       await waitFor(`(() => { const el = document.querySelector('[data-nm="np-vinyl"]'); return !!el && el.classList.contains('is-spinning') })()`, 'vinyl spinning after mode switch', 6000)
       check('切回黑胶后 is-spinning 恢复', true)
+    check('切回黑胶后 [data-nm="np-lyrics"] 不存在（严格互斥）',
+      !(await evaluate(`!!document.querySelector('[data-nm="np-lyrics"]')`)))
+    const vinylShape = await evaluate(`(() => {
+      const vin = document.querySelector('[data-nm="np-vinyl"]')
+      if (!vin) return null
+      const vcs = getComputedStyle(vin)
+      const vr = vin.getBoundingClientRect()
+      const label = vin.querySelector('.nm-vinyl-label')
+      const disc = vin.querySelector('.nm-vinyl-disc')
+      const img = vin.querySelector('.nm-vinyl-label img') || vin.querySelector('img')
+      const lcs = label ? getComputedStyle(label) : null
+      const dcs = disc ? getComputedStyle(disc) : null
+      const ics = img ? getComputedStyle(img) : null
+      const lr = label ? label.getBoundingClientRect() : null
+      const dr = disc ? disc.getBoundingClientRect() : null
+      return {
+        vinyl: { radius: vcs.borderRadius, clip: vcs.clipPath, w: Math.round(vr.width), h: Math.round(vr.height) },
+        label: lcs ? { radius: lcs.borderRadius, clip: lcs.clipPath, w: lr ? Math.round(lr.width) : -1, h: lr ? Math.round(lr.height) : -1 } : null,
+        disc: dcs ? { radius: dcs.borderRadius, clip: dcs.clipPath, w: dr ? Math.round(dr.width) : -1, h: dr ? Math.round(dr.height) : -1 } : null,
+        img: ics ? { radius: ics.borderRadius, clip: ics.clipPath } : null,
+        spinning: vin.classList.contains('is-spinning'),
+      }
+    })()`)
+    const round = (v) => !!v && (/50%/.test(v.radius || '') || /50%/.test(v.clip || ''))
+    check('黑胶盘体正圆（宽高相等 + border-radius/clip 50%）',
+      !!vinylShape && vinylShape.vinyl.w === vinylShape.vinyl.h && round(vinylShape.vinyl), JSON.stringify(vinylShape && vinylShape.vinyl))
+    check('盘心 label 圆形（border-radius/clip 50%，宽高相等）',
+      !!vinylShape && !!vinylShape.label && vinylShape.label.w === vinylShape.label.h && vinylShape.label.w > 0 &&
+      round(vinylShape.label), JSON.stringify(vinylShape && vinylShape.label))
+    check('黑胶盘体 disc 圆形（若存在）',
+      !vinylShape || !vinylShape.disc || (vinylShape.disc.w === vinylShape.disc.h && round(vinylShape.disc)),
+      JSON.stringify(vinylShape && vinylShape.disc))
+    check('盘心封面 img 圆形（border-radius 50%）',
+      !!vinylShape && !!vinylShape.img && /50%/.test(vinylShape.img.radius || ''), JSON.stringify(vinylShape && vinylShape.img))
+    check('圆形黑胶播放中仍在旋转', !!vinylShape && vinylShape.spinning, JSON.stringify(vinylShape && { spinning: vinylShape.spinning }))
+    await S('21-nowplaying-vinyl-circular.png')
     } catch (err) {
       check('切回黑胶后 is-spinning 恢复', false, String(err))
     }
@@ -1183,6 +1350,15 @@ try {
           const src = await evaluate(`(() => { const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio'); return a ? a.getAttribute('src') : null })()`)
           check('切换 lossless 后 audio.src 含 level=lossless', false, 'src=' + src)
         }
+        // 切音质会重新 load：等 loadedmetadata 后 seek 回原位置再采样（最多 4s）
+        try {
+          await waitFor(`(() => {
+            const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio')
+            if (!a || !Number.isFinite(a.duration) || a.duration <= 0) return false
+            return a.currentTime > 0.25
+          })()`, 'quality seek restore', 4000)
+        } catch { /* 下面 delta 断言暴露 */ }
+        await sleep(250)
         const qAfter = await evaluate(`(() => { const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio'); return a ? { t: a.currentTime, src: (a.getAttribute('src') || ''), level: a.getAttribute('data-level'), paused: a.paused } : null })()`)
         check('audio 根 data-level="lossless"', !!qAfter && qAfter.level === 'lossless', JSON.stringify(qAfter))
         const delta = Math.abs((qAfter && qAfter.t ? qAfter.t : 0) - (qBefore && qBefore.t ? qBefore.t : 0))
@@ -1239,42 +1415,228 @@ try {
   await setTheme('dark')
   await sleep(300)
 
-  console.log('\n[9b] shell.bottom 冲突时回退 shell.overlay（契约 §10.3）')
-  await cdp.send('Page.navigate', { url: BASE + '/?shellBottom=throw' })
-  await waitFor('document.readyState === "complete"', 'fallback page ready', 15000)
-  await waitFor('window.__mounted === true || window.__mountError', 'fallback mount', 15000)
-  const fallbackMount = await evaluate(`({ mountError: window.__mountError, mode: window.__shellBottomMode, slotRender: window.__slotRender })`)
-  check('模拟 shell.bottom 冲突后页面正常挂载', !fallbackMount.mountError, JSON.stringify(fallbackMount))
-  check('shell.bottom 冲突时回退注册 shell.overlay',
-    !!fallbackMount.slotRender && fallbackMount.slotRender.overlay === true && fallbackMount.slotRender.bottom === false,
-    JSON.stringify(fallbackMount))
+  console.log('\n[9b] v3：侧栏迷你播放器（sidebar.footer.action，占满侧栏宽度）')
+  await evaluate(`window.__setSidebarWide(true)`)
+  await evaluate(`window.__setActivePanel('conversation')`)
+  await sleep(900)
+  let miniOk = false
   try {
-    await waitFor(`!!document.querySelector('[data-nm="play-all"]')`, 'fallback play-all', 10000)
-    await clickSel('[data-nm="play-all"]')
-    await waitFor(`!!document.querySelector('[data-nm="dock"], [data-nm="player"]')`, 'fallback dock', 8000)
-    await sleep(500)
-    const fb = await evaluate(`(() => {
-      const dock = document.querySelector('[data-nm="dock"]') || document.querySelector('[data-nm="player"]')
-      const overlay = document.querySelector('#overlay-root')
-      const rootEl = document.querySelector('#root')
-      const bodyEl = document.querySelector('#body')
-      const composerEl = document.querySelector('#composer')
+    await waitFor(`!!document.querySelector('[data-nm="mini-player"]')`, 'mini player wide', 7000)
+    miniOk = true
+    check('展开侧栏 + 对话面板时 mini player 出现', true)
+  } catch (err) {
+    check('展开侧栏 + 对话面板时 mini player 出现', false, '7s 内未出现 [data-nm="mini-player"]')
+  }
+  if (miniOk) {
+    const mini = await evaluate(`(() => {
+      const el = document.querySelector('[data-nm="mini-player"]')
+      const footer = document.querySelector('#sidebar-footer')
+      const rail = document.querySelector('#rail')
+      const settings = document.querySelector('#rail-settings')
+      const er = el.getBoundingClientRect()
+      const fr = footer.getBoundingClientRect()
+      const sr = settings.getBoundingClientRect()
       return {
-        dataDock: dock ? dock.getAttribute('data-dock') : null,
-        inOverlay: !!(overlay && dock && overlay.contains(dock)),
-        rootH: rootEl ? rootEl.clientHeight : -1,
-        bodyH: bodyEl ? bodyEl.clientHeight : -1,
-        composerH: composerEl ? composerEl.offsetHeight : -1,
+        railW: Math.round(rail.getBoundingClientRect().width),
+        footerW: Math.round(fr.width),
+        footerClientW: footer.clientWidth,
+        footerScrollW: footer.scrollWidth,
+        miniW: Math.round(er.width),
+        miniH: Math.round(er.height),
+        miniLeft: Math.round(er.left),
+        footerLeft: Math.round(fr.left),
+        miniRight: Math.round(er.right),
+        footerRight: Math.round(fr.right),
+        miniBottom: Math.round(er.bottom),
+        settingsTop: Math.round(sr.top),
+        hasPrev: !!document.querySelector('[data-nm="mini-prev"]'),
+        hasToggle: !!document.querySelector('[data-nm="mini-toggle"]'),
+        hasNext: !!document.querySelector('[data-nm="mini-next"]'),
+        hasVolume: !!document.querySelector('[data-nm="mini-volume"]'),
+        text: (el.textContent || '').trim().slice(0, 40),
       }
     })()`)
-    check('回退播放条 data-dock="float"', fb.dataDock === 'float', JSON.stringify(fb))
-    check('回退播放条渲染在 shell.overlay 根（不压缩主区）',
-      fb.inOverlay && Math.abs(fb.rootH + fb.composerH - fb.bodyH) <= 2, JSON.stringify(fb))
-    await screenshot('18-dock-fallback-float.png')
-    shots.push(join(SHOTS, '18-dock-fallback-float.png'))
-  } catch (err) {
-    check('回退播放条 data-dock="float"', false, String(err))
+    check('假侧栏已展开为 280px', mini.railW === 280, JSON.stringify(mini))
+    check('mini 占满 footer 宽度（width 差 <2px）',
+      Math.abs(mini.miniW - mini.footerClientW) < 2, JSON.stringify(mini))
+    check('mini 左右边缘与 footer 对齐（x 差 <1px）',
+      Math.abs(mini.miniLeft - mini.footerLeft) < 1 && Math.abs(mini.miniRight - mini.footerRight) < 1, JSON.stringify(mini))
+    check('footer 无横向溢出', mini.footerScrollW <= mini.footerClientW + 1, JSON.stringify(mini))
+    check('mini 高度 ≥56px', mini.miniH >= 56, JSON.stringify(mini))
+    check('mini 不与 Settings 行重叠', mini.miniBottom <= mini.settingsTop + 1, JSON.stringify(mini))
+    check('mini 有 prev/toggle/next/volume 控件',
+      mini.hasPrev && mini.hasToggle && mini.hasNext && mini.hasVolume, JSON.stringify(mini))
+    // prev / next 切歌
+    const idA = await audioTrackId()
+    check('点 mini-next', await clickSel('[data-nm="mini-next"]'))
+    try {
+      await waitFor(`(() => {
+        const a = document.querySelector('audio[data-nm-audio]')
+        if (!a) return false
+        const m = /[?&]id=(\\d+)/.exec(a.getAttribute('src') || '')
+        return !!m && m[1] !== ${JSON.stringify(idA)}
+      })()`, 'mini next change', 7000)
+      check('点 mini-next 后当前曲目变化', true, `id ${idA} → ${await audioTrackId()}`)
+    } catch (err) {
+      check('点 mini-next 后当前曲目变化', false, String(err))
+    }
+    const idB = await audioTrackId()
+    check('点 mini-prev', await clickSel('[data-nm="mini-prev"]'))
+    try {
+      await waitFor(`(() => {
+        const a = document.querySelector('audio[data-nm-audio]')
+        if (!a) return false
+        const m = /[?&]id=(\\d+)/.exec(a.getAttribute('src') || '')
+        return !!m && m[1] !== ${JSON.stringify(idB)}
+      })()`, 'mini prev change', 7000)
+      check('点 mini-prev 后当前曲目变化', true, `id ${idB} → ${await audioTrackId()}`)
+    } catch (err) {
+      check('点 mini-prev 后当前曲目变化', false, String(err))
+    }
+    // 音量
+    const mute0 = await evaluate(`(() => { const a = document.querySelector('audio[data-nm-audio]'); return a ? a.muted : null })()`)
+    check('点 mini-volume', await clickSel('[data-nm="mini-volume"]'))
+    await sleep(450)
+    const volState = await evaluate(`(() => {
+      const a = document.querySelector('audio[data-nm-audio]')
+      const ranges = [...document.querySelectorAll('input[type="range"]')].filter((el) => {
+        const r = el.getBoundingClientRect()
+        return r.width > 0 && r.height > 0
+      })
+      return { muted: a ? a.muted : null, rangeCount: ranges.length, pop: !!document.querySelector('[class*="volume-pop"], [class*="volume-slider"]') }
+    })()`)
+    check('点音量按钮静音翻转或出现音量滑杆',
+      (volState.muted !== mute0) || volState.rangeCount > 0 || volState.pop,
+      JSON.stringify({ mute0, volState }))
+    if (volState.muted === true) {
+      await evaluate(`(() => { const a = document.querySelector('audio[data-nm-audio]'); if (a) a.muted = false })()`)
+    }
+    await S('20-mini-sidebar.png')
+    // 浅色
+    await setTheme('light')
+    await sleep(650)
+    await S('20b-mini-sidebar-light.png')
+    await setTheme('dark')
+    await sleep(400)
+
+    // 收起侧栏 56px → rail 形态
+    await evaluate(`window.__setSidebarWide(false)`)
+    await sleep(700)
+    const miniRail = await evaluate(`(() => {
+      const el = document.querySelector('[data-nm="mini-player"]')
+      const footer = document.querySelector('#sidebar-footer')
+      const rail = document.querySelector('#rail')
+      if (!el || !footer || !rail) return null
+      const er = el.getBoundingClientRect()
+      const fr = footer.getBoundingClientRect()
+      return {
+        railW: Math.round(rail.getBoundingClientRect().width),
+        footerW: Math.round(fr.width),
+        miniW: Math.round(er.width),
+        miniH: Math.round(er.height),
+        hasPrev: !!document.querySelector('[data-nm="mini-prev"]'),
+        footerScrollW: footer.scrollWidth,
+        footerClientW: footer.clientWidth,
+      }
+    })()`)
+    check('收起侧栏后为 56px rail', !!miniRail && miniRail.railW === 56, JSON.stringify(miniRail))
+    check('rail 形态仅 28px 封面按钮（宽度 ≤34，无 prev/next）',
+      !!miniRail && miniRail.miniW <= 34 && !miniRail.hasPrev, JSON.stringify(miniRail))
+    check('rail 形态 footer 无横向溢出',
+      !!miniRail && miniRail.footerScrollW <= miniRail.footerClientW + 1, JSON.stringify(miniRail))
+    await S('20c-mini-rail.png')
+
+    // 点 rail 封面 → 切面板 + 播放页
+    check('点 mini-cover', await clickSel('[data-nm="mini-cover"]'))
+    try {
+      await waitFor(`!!document.querySelector('[data-nm="nowplaying"]')`, 'nowplaying from mini', 8000)
+      check('点 mini 封面进入播放页', true)
+    } catch (err) {
+      check('点 mini 封面进入播放页', false, String(err))
+    }
+    const panelAfter = await evaluate(`window.__activePanelId`)
+    const selected = await evaluate(`window.__selectedPanels`)
+    check('mini 点击调用 selectPanel(netease-music)',
+      panelAfter === 'netease-music' && Array.isArray(selected) && selected.includes('netease-music'),
+      JSON.stringify({ panelAfter, selected }))
+    await evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`)
+    try {
+      await waitFor(`!document.querySelector('[data-nm="nowplaying"]')`, 'back from mini nowplaying', 6000)
+    } catch { /* ignore */ }
+    await sleep(600)
+    check('面板为 netease-music 时 mini player 隐藏',
+      !(await evaluate(`!!document.querySelector('[data-nm="mini-player"]')`)))
+    check('面板为 netease-music 时面板内 dock 存在',
+      await evaluate(`!!document.querySelector('[data-nm="dock"]')`))
   }
+
+  console.log('\n[9c] v3：header 吸顶不透明 + logo')
+  if (await evaluate(`!!document.querySelector('[data-nm="tab"][data-tab="recommend"]')`)) {
+    await clickSel('[data-nm="tab"][data-tab="recommend"]')
+  }
+  await sleep(350)
+  await evaluate(`(() => {
+    const sp = document.querySelector('[data-nm="scroll"]')
+    if (sp) sp.scrollTop = 800
+    window.scrollTo(0, 800)
+  })()`)
+  await sleep(500)
+  const headerInfo = await evaluate(`(() => {
+    const root = document.querySelector('[data-nm="root"]')
+    const header = document.querySelector('[data-nm="header"]')
+    const logo = header ? header.querySelector('img') : null
+    const inner = header ? header.querySelector('.nm-header') : null
+    const cs = header ? getComputedStyle(header) : null
+    const rr = root ? root.getBoundingClientRect() : null
+    const hr = header ? header.getBoundingClientRect() : null
+    const ir = inner ? inner.getBoundingClientRect() : null
+    const lr = logo ? logo.getBoundingClientRect() : null
+    const parseAlpha = (s) => {
+      if (!s) return null
+      if (s.indexOf('rgba(') === 0) {
+        const parts = s.slice(5, s.length - 1).split(',')
+        return parts.length > 3 ? parseFloat(parts[3]) : 1
+      }
+      if (s.indexOf('/') >= 0) {
+        const tail = s.slice(s.indexOf('/') + 1)
+        return parseFloat(tail)
+      }
+      return 1
+    }
+    return {
+      hasHeader: !!header,
+      hasRoot: !!root,
+      headerTop: hr ? Math.round(hr.top) : -1,
+      rootTop: rr ? Math.round(rr.top) : -1,
+      headerH: hr ? Math.round(hr.height) : -1,
+      innerH: ir ? Math.round(ir.height) : -1,
+      bg: cs ? cs.backgroundColor : null,
+      alpha: cs ? parseAlpha(cs.backgroundColor) : null,
+      position: cs ? cs.position : null,
+      zIndex: cs ? cs.zIndex : null,
+      logo: logo ? { tag: logo.tagName, src: (logo.getAttribute('src') || '').slice(0, 32), naturalWidth: logo.naturalWidth, w: lr ? Math.round(lr.width) : -1, h: lr ? Math.round(lr.height) : -1 } : null,
+      clearance: getComputedStyle(document.documentElement).getPropertyValue('--dsh-frame-top-clearance').trim(),
+    }
+  })()`)
+  check('header [data-nm="header"] 存在', headerInfo.hasHeader, JSON.stringify(headerInfo))
+  check('滚动 800px 后 header 贴面板顶部（rect.top 差 <2px）',
+    headerInfo.hasHeader && Math.abs(headerInfo.headerTop - headerInfo.rootTop) <= 2, JSON.stringify(headerInfo))
+  check('header 背景不透明（alpha ≥ 0.9）',
+    headerInfo.alpha != null && headerInfo.alpha >= 0.9, JSON.stringify(headerInfo))
+  check('header 覆盖 top clearance（shell ≥ clearance）且内容行 ≤52px',
+    headerInfo.headerH >= 20 && headerInfo.innerH > 0 && headerInfo.innerH <= 52, JSON.stringify(headerInfo))
+  check('header shell 高度合理（≤ clearance+60px）',
+    headerInfo.headerH <= 80, JSON.stringify({ headerH: headerInfo.headerH, clearance: headerInfo.clearance }))
+  check('header 为 sticky/fixed 且 z-index 高于内容',
+    ['sticky', 'fixed'].includes(headerInfo.position), JSON.stringify(headerInfo))
+  check('header 内 logo 是 PNG dataURL <img>（naturalWidth>0，≤26px）',
+    !!headerInfo.logo && headerInfo.logo.tag === 'IMG' &&
+    /^data:image\/png;base64,/.test(headerInfo.logo.src) &&
+    headerInfo.logo.naturalWidth > 0 && headerInfo.logo.w > 0 && headerInfo.logo.w <= 26,
+    JSON.stringify(headerInfo.logo))
+  await S('18-header-scrolled-dark.png')
+  await evaluate(`(() => { const sp = document.querySelector('[data-nm="scroll"]'); if (sp) sp.scrollTop = 0; window.scrollTo(0, 0) })()`)
+  await sleep(250)
 
   console.log('\n[8] 运行期错误')
   const realErrors = errors.filter((e) => !/favicon|ERR_ABORTED/.test(e))
@@ -1288,7 +1650,7 @@ try {
       await waitFor(`!!document.querySelector('[data-nm="play-all"]')`, 'play-all after reload', 8000)
     }
     await clickSel('[data-nm="play-all"]')
-    await waitFor(`!!document.querySelector('[data-nm="player"]')`, 'player after reload', 8000)
+    await waitFor(`!!document.querySelector('[data-nm="dock"], [data-nm="player"]')`, 'dock after reload', 8000)
     check('重新播放后播放条恢复（回归）', true)
   } catch (err) {
     check('重新播放后播放条恢复（回归）', false, String(err))

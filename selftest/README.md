@@ -21,7 +21,7 @@ cd netease-panel-selftest
 | 文件 | 作用 |
 | --- | --- |
 | `server.mjs` | 静态服务 + 全部 `/netease-panel/api/*` mock，严格按 CONTRACT 第 5 节信封 |
-| `harness.html` | React 18 UMD + `__ModuleLoader__` stub + 假 ctx（捕获 main / sidebar.panellist / shell.bottom / shell.overlay）+ 假三栏布局与底部输入框占位（shell.bottom 会压缩主区高度）+ DSH token 主题快照（light/dark 走 `prefers-color-scheme`） |
+| `harness.html` | React 18 UMD + `__ModuleLoader__` stub + 假 ctx（捕获 main / sidebar.panellist / sidebar.footer.action；v3 起 client 不再注册 shell.bottom/overlay）+ 假三栏布局（侧栏可展开 280px / 收起 56px，footer 槽渲染迷你播放器，注入 `usePanelInfo` 模拟面板切换）+ 面板内 64px 假输入框 + DSH token 主题快照 |
 | `run.mjs` | headless Chrome CDP 驱动：截图 + 脚本化断言 + PASS/FAIL 清单 |
 | `assets/react.js` `assets/react-dom.js` | 离线 React 18 production UMD（与 garmin-panel-selftest 同一份） |
 | `shots/*.png` | 验收截图（见下） |
@@ -39,11 +39,12 @@ cd netease-panel-selftest
 - `/song/url?level=`：`auto→exhigh/320000`、`standard/128000`、`exhigh/320000`、`lossless/1512987`、`hires/1512987`；`trial` 可用 `/__config {trial:true}` 打开。
 - `/img?u=` 返回本地 SVG 兜底（client 封面失败 fallback 用）。
 - `/login/start` 返回固定 QR SVG data URL；`/login/check` 第 1、2 次 `waiting`、第 3 次 `scanned`、第 4 次 `ok`（契约第 9 节）。
-- 控制面：`POST /__config`（`authed` / `bridge:'ready'|'starting'|'error'` / `errorMode:null|'home'|'all'` / `slowMs` / `trial`），`GET /__calls`，`POST /__reset`。
+- v3 引擎安装：`POST /setup/install` 启动状态机（clone→venv→pip→verify→done，约 3.2s），`GET /setup/install/log` 返回 `{state,phase,lines,error,installed}`；`/status` 带 `engine:'installed|missing|installing|failed'` 与 `install` 摘要。`/__config {installError:true}` 可模拟失败。
+- 控制面：`POST /__config`（`authed` / `bridge:'ready'|'starting'|'error'` / `engine` / `installError` / `errorMode:null|'home'|'all'` / `slowMs` / `trial`），`GET /__calls`，`POST /__reset`。
   - `bridge:'error'` → `/status` 报 `bridge:'error'`，数据接口 503 `code:'BRIDGE'`（验证「引擎缺失」不白屏）。
   - `errorMode:'home'` → 数据接口 500 `code:'NETWORK'`（验证错误态 + 重试原地恢复）。
 
-## 断言覆盖（130 项，v1 + v2）
+## 断言覆盖（192 项，v1 + v2 + v3）
 
 1. 模块：client.js 加载、`__ModuleLoader__.load`、3 个 slot 注册及 spec（`main.key`、`sidebar.panellist.id/order=30`、`shell.overlay.id`）、`<audio data-nm-audio>` 创建、无曲目时播放条不渲染。
    侧栏图标：`<img>`、`src` 为 `data:image/png;base64,`（官方红标）、`naturalWidth>0`、渲染尺寸 = 传入 size(20)，深/浅色各一张 4x 放大截图。
@@ -55,14 +56,17 @@ cd netease-panel-selftest
 7. 主题与响应式：深/浅色截图；`[data-nm="play-all"]` 对比度 ≥3、激活 tab ≥2.5；真实 DSH 默认主题（`brand-primary` 注入中性 `#f9fafb`）下「播放全部」仍可读；1440 / 1024 / 600 三档 `scrollWidth <= clientWidth+1`。
 8. 错误模式：`/home` 500 → `data-nm="error"` + 后端中文错误文案（非 `Invalid status code`）；点「重试」原地恢复。
 9. 引擎缺失：`/status bridge=error` → 页面不白屏 + 显示安装提示；恢复后首页重新渲染。
-10. v2（契约 §10.5）：
-    - 停靠：dock 落在 `shell.bottom`（两槽都捕获，优先 bottom）、`data-dock="bottom"`、不遮挡 `#composer`、`#root+#composer ≈ body` 且 `body+bottom = app` 高度。
-    - 播放页：点曲目行 → `nowplaying` 出现、audio 在播 currentTime 前进；左上角 logo 为官方 PNG dataURL `<img>`（naturalWidth>0）。
-    - 黑胶：`np-vinyl` 播放中 `is-spinning`；暂停后无 spinning；恢复播放后恢复；切歌词/切回黑胶后状态正确。
-    - 歌词：`lyric-line` ≥5 且恰好一行 `data-active="true"`；播放推进后 active 行变化；点击某行 → `audio.currentTime` 跳到 `data-time` 附近且该行变 active；`np-mode[data-mode="lyrics"]`。
-    - 音质：`np-quality` → `quality-menu` → `quality-option[data-level="lossless"]` → `audio.src` 含 `level=lossless`、audio `data-level="lossless"`、切换前后 currentTime 差 <2s。
-    - 返回：`np-back`/Esc 回列表（列表仍在）；点 `dock-cover` 重新进播放页；浅色播放页截图；600px 底部停靠无溢出。
-11. 运行期：无 `console.error`、无未捕获页面异常；重新播放后播放条恢复。
+10. v2/v3 播放页（契约 §10.5 / §11）：
+    - 停靠/槽位：client 不再注册 `shell.bottom` / `shell.overlay`；面板内 `[data-nm="dock"]` 在 `[data-nm="root"]` 内、`position != fixed`、dock.top ≥ scroll.bottom、不遮挡输入框；`sidebar.footer.action` spec（id=netease-mini、order=10）。
+    - mini player：宽侧栏(280px) 时 mini 占满 footer 宽度（差 <2px）、左右对齐（<1px）、高 ≥56、不压 Settings、footer 无横向溢出；`mini-prev/mini-toggle/mini-next/mini-volume` 存在且 prev/next 切歌、volume 静音或弹出滑杆；56px rail 时只显示 ≤34px 封面；面板切到 netease-music 时 mini 隐藏、面板内 dock 出现；点 mini 封面 → selectPanel + 播放页。
+    - 播放页互斥：默认 vinyl 有 np-vinyl/is-spinning、无 np-lyrics；lyrics 有 lyric-line ≥5 且恰好一行 active、无 np-vinyl；切回 vinyl 恢复旋转；np-bg 存在且含封面 URL + blur；点黑胶只切换 data-playing、模式仍 vinyl。
+    - 黑胶圆形：np-vinyl、盘心 label、封面 img 宽高相等 + border-radius/clip 50%。
+    - 歌词：时间推进后 active 行变化；点击行 → audio.currentTime 跳到 data-time 附近且该行 active。
+    - 音质：np-quality → quality-menu → lossless → audio.src 含 `level=lossless`、audio data-level=lossless、位置差 <2s。
+    - 返回：np-back/Esc 回列表；dock-cover 重进播放页；浅色播放页截图。
+11. v3 header：滚动 800px 后 `[data-nm="header"]` 贴面板顶（差 <2px）、背景 alpha ≥0.9、高度覆盖 clearance 且 ≤56px、sticky/fixed；header logo 为 PNG dataURL img（naturalWidth>0、≤26px）。
+12. v3 引擎无感安装：engine missing → 出现安装 UI/日志/进度 → 点安装（或自动）→ done 后卡片消失、自动渲染首页、`/status.engine=installed`；失败态显示 error + `engine-retry`。
+13. 运行期：无 `console.error`、无未捕获页面异常；重新播放后播放条恢复。
 
 ## 截图
 
@@ -87,8 +91,16 @@ cd netease-panel-selftest
 | `shots/13-nowplaying-vinyl-dark.png` | v2 全屏播放页·黑胶模式（深色） |
 | `shots/14-nowplaying-lyrics-dark.png` | v2 全屏播放页·歌词模式（深色，高亮+翻译） |
 | `shots/15-nowplaying-light.png` | v2 全屏播放页（浅色） |
-| `shots/16-dock-bottom.png` | v2 播放条停靠 shell.bottom（输入框被顶上去，不遮挡） |
-| `shots/17-narrow-600.png` | v2 600px 窄屏底部停靠 |
+| `shots/16-dock-bottom.png` | v2 历史截图（v3 已改为面板内 dock，不再全局停靠） |
+| `shots/17-narrow-600.png` | 600px 窄屏（面板内 dock） |
+| `shots/18-header-scrolled-dark.png` | v3 滚动 800px 后 header 吸顶不透明 |
+| `shots/19-inpanel-dock.png` | v3 面板内 dock（列表不被遮挡、输入框在下方） |
+| `shots/20-mini-sidebar.png` | v3 对话页左侧栏迷你播放器（280px 宽态，含 prev/播放/next/音量） |
+| `shots/20b-mini-sidebar-light.png` | v3 侧栏迷你播放器（浅色） |
+| `shots/20c-mini-rail.png` | v3 56px rail 形态（仅封面按钮） |
+| `shots/21-nowplaying-vinyl-circular.png` | v3 正圆黑胶（互斥模式） |
+| `shots/22-install-progress.png` | v3 引擎安装中（进度/日志） |
+| `shots/23-engine-installed.png` | v3 引擎装好、卡片消失后的首页 |
 
 ## 主题 token 说明（与真实 Harness 的差异）
 
@@ -107,7 +119,9 @@ cd netease-panel-selftest
   本机 DSH 沙箱不允许 Chrome 写 `~/Library/Application Support/Google/Chrome/Crashpad`，否则 Chrome 直接 `Trace/BPT trap`；
   `--user-data-dir` 固定放本目录 `tmp/chrome-profile`（工作区内）。CDP `send` 有 20s 超时、整轮有 8 分钟 watchdog。
 - harness 只模拟 56px 左侧栏 + 全宽 main + 64px 假输入框，没有 DSH 的真实顶栏/标题栏/输入框；`--dsh-frame-top-clearance` 设为 20px。
-- `shell.bottom` 用「root 级底部 flex 行 + 压缩 #body」近似真实占位槽；真实 Harness 的槽位实现/高度策略可能不同，需真机复核。回退路径可用 `?shellBottom=throw` 模拟（dock 应回退 `shell.overlay` + `data-dock="float"`）。
+- v3 假侧栏用 56px/280px 两种宽度模拟 DSH 侧栏；`sidebar.footer.action` 用固定 footer 容器 + 注入的 `usePanelInfo`（`window.__setActivePanel`）模拟真实槽位/面板切换；主区在 conversation 时切换为假对话页（`#fake-conversation`）。真实 Harness 的槽位宽度、注入 hook 形状可能不同，需真机复核。
+- 面板内 dock 断言基于「dock 是 flex 布局行、scroll 在上」；真实 DSH 的 `--dsh-frame-top-clearance` 下 header 是否与框架顶栏严丝合缝**无法离线验证**，需真机目视。
+- 引擎安装是本地 mock 状态机（clone→venv→pip→verify→done），不实际安装 Python 包；真实安装时长/网络错误形态需真机验证。
   真实安装后 `--dsh-frame-top-clearance` 是否存在、页面顶部是否被 Harness 顶栏遮挡，**本 harness 无法验证**（需在真实 Harness 里目视确认）。
 - mock 音频是 3s 正弦波，与真实曲目时长无关；播放/切歌/进度/ended 只验证行为，不验证真实音质。
 - 封面/头像是本地渐变 SVG，不是真实图片，视觉上只检查布局与占位。

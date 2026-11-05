@@ -360,3 +360,30 @@ harness 的 mock 服务必须与第 5 节路由/信封完全一致；`/audio` �
 | `data-nm-audio` `data-level="<current level>"` | <audio>，断言 src 里含 `level=` |
 
 验收要求（verify）：点曲目行 → `nowplaying` 出现且 `audio` 在播；切「歌词」→ 歌词行 ≥5 且有 `data-active="true"`；切「黑胶」→ `np-vinyl` 有 `is-spinning`；切音质到 `lossless` → audio.src 含 `level=lossless` 且播放位置大致保持；点击 dock 封面 → 进入播放页；dock 根 `data-dock` 为 `bottom`；返回后列表仍在；深/浅色各一张播放页截图（vinyl + lyrics 各一张）。
+
+## 11. v3 需求（用户第三轮反馈）
+
+### 11.1 播放条位置（取代 §10.3）
+- **不再**注册 `shell.bottom` / `shell.overlay` 的全局播放条（用户明确不要它悬浮在整个 Harness 上，也不要占对话工作区）。
+- 音乐面板内：页面底部一行 dock（面板内 sticky，占自己高度；内容 max-width 1480 居中；无曲目不渲染）。
+- 其他面板：注册 `sidebar.footer.action`（list，ownerProps `{wide:boolean}`，位于 Settings 旁），id=`netease-mini`：
+  - `wide=true`：紧凑胶囊（28px 封面 + 歌名 + 播放/暂停，宽度 ≤ 侧栏可用宽度，下方 2px 进度）。
+  - `wide=false`（56px rail）：仅 28px 封面按钮。
+  - 通过 `usePanelInfo()` 判断：面板是 `netease-music` 时隐藏（面板内有完整 dock）。
+  - 点击封面/歌名 → `selectPanel('netease-music')` 并打开播放页。
+- 钩子：`data-nm="mini-player"` / `data-nm="mini-cover"` / `data-nm="mini-toggle"`；面板内 dock 保留 `data-nm="dock"`。
+
+### 11.2 顶部标题栏
+- logo 22px（去掉大阴影），标题 15.5px，header 高度 ≤ 52px。
+- header `position:sticky; top:0`，`padding-top: calc(var(--dsh-frame-top-clearance,0px) + 10px)`，背景不透明（bg 96%+blur），z-index 高于页面内容；`.nm-root` 不再自带 padding-top；滚动内容不得出现在 header 之上或与框架之间留缝。
+
+### 11.3 黑胶圆形
+- `.nm-vinyl`、盘心 label、label 内 `img` 全部 `border-radius:50%` + `overflow:hidden` + `clip-path:circle(50%)`；封面 `object-fit:cover`；只允许圆形盘体旋转。
+
+### 11.4 引擎无感安装
+- Host：`POST /netease-panel/api/setup/install` 启动；`GET /setup/install/log` 返回 `{state:'idle|running|done|failed', phase, lines, error, installed}`；`/status` 带 `engine:'installing|failed|installed'` 和 `install` 摘要。
+- 激活时若引擎缺失自动开始安装；装完自动重连 bridge、清缓存、不需重启 Harness。
+- UI：顶部细状态条 + 「引擎缺失」卡片显示阶段/日志/重试；装好自动拉 /status + /home。
+
+### 11.5 新增 harness 钩子/断言
+见 §10.5 基础上：`mini-player/mini-cover/mini-toggle`、面板内 `dock`、header 吸顶不透明、黑胶圆形、安装流程状态机。

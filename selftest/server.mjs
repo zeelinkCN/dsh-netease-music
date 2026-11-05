@@ -37,6 +37,9 @@ const cfg = {
   vipType: 11,
   level: 9,
   trial: false,
+  engine: 'installed',   // installed | missing | installing | failed
+  installError: false,
+  install: { state: 'idle', phase: 'idle', lines: [], error: null, installed: true, startedAt: 0 },
 }
 let calls = []
 let loginCheckCount = 0
@@ -412,9 +415,23 @@ function serveAudio(req, res, level = 'auto') {
 /* ------------------------------------------------------------------ *
  * API
  * ------------------------------------------------------------------ */
+function installSummary() {
+  const it = cfg.install || {}
+  return {
+    state: it.state || 'idle',
+    phase: it.phase || 'idle',
+    lines: Array.isArray(it.lines) ? it.lines.slice(-40) : [],
+    error: it.error || null,
+    installed: !!it.installed,
+    tail: Array.isArray(it.lines) && it.lines.length ? it.lines[it.lines.length - 1] : '',
+  }
+}
+
 function apiStatus() {
   const base = {
     bridge: cfg.bridge,
+    engine: cfg.engine,
+    install: installSummary(),
     authed: cfg.authed,
     anonymous: !cfg.authed,
     nickname: cfg.authed ? cfg.nickname : null,
@@ -481,6 +498,9 @@ async function handleApi(req, res, path, searchParams) {
   if (cfg.bridge === 'error' && path !== '/status' && path !== '/login/start' && path !== '/login/check' && path !== '/logout') {
     return fail(res, 'BRIDGE', '数据引擎未就绪（mock：bridge=error）', 503)
   }
+  if (cfg.engine !== 'installed' && path !== '/status' && path !== '/login/start' && path !== '/login/check' && path !== '/logout' && path !== '/setup/install' && path !== '/setup/install/log') {
+    return fail(res, 'BRIDGE', '数据引擎未安装（mock：engine=' + cfg.engine + '）', 503)
+  }
 
   if (isErrorMode('all') || isErrorMode('home')) {
     // 错误模式只影响数据接口，登录 / status 保持可用，方便单独验证错误态 UI
@@ -533,6 +553,53 @@ async function handleApi(req, res, path, searchParams) {
     case '/lyrics': {
       const t = tracks.find((x) => String(x.id) === String(searchParams.get('id'))) || tracks[0]
       return ok(res, { lrc: LRC(t.name, t.artist), tlyric: TLYRIC })
+    }
+
+    case '/setup/install': {
+      if (req.method !== 'POST') return fail(res, 'INTERNAL', 'method not allowed', 405)
+      cfg.engine = 'installing'
+      cfg.install = {
+        state: 'running',
+        phase: 'clone',
+        lines: ['开始安装网易云数据引擎…', 'git clone --depth 1 cloud-music-mcp'],
+        error: null,
+        installed: false,
+        startedAt: Date.now(),
+      }
+      return ok(res, { started: true })
+    }
+
+    case '/setup/install/log': {
+      const it = cfg.install || {}
+      if (it.state === 'running' && it.startedAt) {
+        const elapsed = Date.now() - it.startedAt
+        const phases = [
+          { at: 0, phase: 'clone', lines: ['开始安装网易云数据引擎…', 'git clone --depth 1 cloud-music-mcp'] },
+          { at: 600, phase: 'venv', lines: ['克隆完成，创建 Python venv…'] },
+          { at: 1300, phase: 'pip', lines: ['安装依赖 pyncm / qrcode…'] },
+          { at: 2200, phase: 'verify', lines: ['依赖安装完成，校验 import pyncm…'] },
+        ]
+        const failedNow = cfg.installError && elapsed >= 1500
+        const doneNow = !cfg.installError && elapsed >= 3200
+        if (failedNow) {
+          cfg.install.state = 'failed'
+          cfg.install.phase = 'pip'
+          cfg.install.error = 'pip install 失败：网络超时（mock）'
+          cfg.install.lines = ['开始安装网易云数据引擎…', 'git clone --depth 1 cloud-music-mcp', '创建 Python venv…', '安装依赖 pyncm / qrcode…', 'ERROR: 网络超时，安装失败']
+          cfg.engine = 'failed'
+        } else if (doneNow) {
+          cfg.install.state = 'done'
+          cfg.install.phase = 'done'
+          cfg.install.installed = true
+          cfg.install.lines = ['开始安装网易云数据引擎…', 'git clone --depth 1 cloud-music-mcp', '创建 Python venv…', '安装依赖 pyncm / qrcode…', '校验 import pyncm… ok', '数据引擎已就绪']
+          cfg.engine = 'installed'
+        } else {
+          const cur = phases.filter((p) => elapsed >= p.at).pop() || phases[0]
+          cfg.install.phase = cur.phase
+          cfg.install.lines = phases.filter((p) => elapsed >= p.at).flatMap((p) => p.lines)
+        }
+      }
+      return ok(res, installSummary())
     }
 
     case '/login/start':
@@ -596,6 +663,21 @@ const server = createServer(async (req, res) => {
       const patch = await readBody(req)
       Object.assign(cfg, patch)
       if (patch.loginReset) loginCheckCount = 0
+      // engine 状态变化时同步安装摘要，避免 install.installed=true 掩盖 engine:missing
+      if ('engine' in patch) {
+        if (patch.engine === 'installed') {
+          cfg.install = { state: 'idle', phase: 'idle', lines: [], error: null, installed: true, startedAt: 0 }
+        } else {
+          cfg.install = {
+            state: patch.engine === 'failed' ? 'failed' : 'idle',
+            phase: 'idle',
+            lines: [],
+            error: null,
+            installed: false,
+            startedAt: 0,
+          }
+        }
+      }
     }
     return json(res, 200, { ...cfg, client: CLIENT, clientExists: existsSync(CLIENT) })
   }
@@ -605,6 +687,9 @@ const server = createServer(async (req, res) => {
     loginCheckCount = 0
     cfg.errorMode = null
     cfg.slowMs = 0
+    cfg.engine = 'installed'
+    cfg.installError = false
+    cfg.install = { state: 'idle', phase: 'idle', lines: [], error: null, installed: true, startedAt: 0 }
     return json(res, 200, { ok: true })
   }
 

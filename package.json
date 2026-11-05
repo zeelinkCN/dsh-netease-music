@@ -19,7 +19,9 @@
     "assets/*.png",
     "server/bridge.py",
     "README.md",
-    "docs/CONTRACT.md"
+    "docs/CONTRACT.md",
+    "server/installer.mjs",
+    "LICENSE"
   ],
   "dsh": {
     "bundle": {

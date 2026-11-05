@@ -119,7 +119,19 @@ window.__ModuleLoader__.load({
       'engine.fix': '修复方式',
       'engine.copy': '复制命令',
       'engine.copied': '已复制',
-      'engine.hint': '安装完成后点击「重试」即可恢复，不影响已经加载的页面。',
+      'engine.hint': '会自动安装数据引擎，完成后页面自动刷新。',
+      'engine.install': '一键安装',
+      'engine.retryInstall': '重试安装',
+      'engine.installingTitle': '正在安装数据引擎…',
+      'engine.installingDesc': '安装会自动完成，期间可以继续浏览。',
+      'engine.installFailed': '数据引擎安装失败',
+      'engine.wait': '请稍候，首次安装可能需要几分钟…',
+      'engine.phase.clone': '克隆源码',
+      'engine.phase.venv': '创建环境',
+      'engine.phase.pip': '安装依赖',
+      'engine.phase.verify': '校验',
+      'engine.phase.done': '完成',
+      'engine.phase.failed': '失败',
       'fmt.locale': 'zh-CN',
       'toast.playlistError': '无法播放该内容，请稍后重试',
       'toast.logoutDone': '已退出登录',
@@ -270,7 +282,19 @@ window.__ModuleLoader__.load({
       'engine.fix': 'How to fix',
       'engine.copy': 'Copy command',
       'engine.copied': 'Copied',
-      'engine.hint': 'Click Retry when the installation finishes.',
+      'engine.hint': 'The engine installs automatically and the page refreshes when done.',
+      'engine.install': 'Install engine',
+      'engine.retryInstall': 'Retry install',
+      'engine.installingTitle': 'Installing the music engine…',
+      'engine.installingDesc': 'Installation runs in the background; you can keep browsing.',
+      'engine.installFailed': 'Engine installation failed',
+      'engine.wait': 'This may take a few minutes on the first run…',
+      'engine.phase.clone': 'Cloning source',
+      'engine.phase.venv': 'Creating environment',
+      'engine.phase.pip': 'Installing dependencies',
+      'engine.phase.verify': 'Verifying',
+      'engine.phase.done': 'Done',
+      'engine.phase.failed': 'Failed',
       'fmt.locale': 'en-US',
       'toast.playlistError': 'Could not play this content. Try again later.',
       'toast.logoutDone': 'Signed out',
@@ -1041,6 +1065,7 @@ window.__ModuleLoader__.load({
         if (volume > 0) lastVolume = volume
         if (audio) {
           try {
+            audio.muted = volume === 0
             audio.volume = volume
           } catch (err) {
             /* ignore */
@@ -1054,6 +1079,7 @@ window.__ModuleLoader__.load({
           const volume = state.volume > 0 ? state.volume : lastVolume || 0.8
           if (audio) {
             try {
+              audio.muted = false
               audio.volume = volume
             } catch (err) {
               /* ignore */
@@ -1066,6 +1092,7 @@ window.__ModuleLoader__.load({
         if (audio) {
           try {
             audio.volume = 0
+            audio.muted = true
           } catch (err) {
             /* ignore */
           }
@@ -1277,14 +1304,15 @@ window.__ModuleLoader__.load({
     /* ------------------------------------------------------------------ *
      * v2 全局 UI store：dock 形态 / Now Playing / 播放页模式 / 登录态
      * ------------------------------------------------------------------ */
-    let dockPlacement = 'bottom'
-    const dockPlacementListeners = new Set()
+    /* 音乐面板是否挂载：侧栏迷你播放器据此判断是否让位给面板内 dock */
+    let pageMounted = false
+    const pageMountedListeners = new Set()
 
-    function setDockPlacement(next) {
-      const value = next === 'float' ? 'float' : 'bottom'
-      if (dockPlacement === value) return
-      dockPlacement = value
-      Array.from(dockPlacementListeners).forEach((fn) => {
+    function setPageMounted(next) {
+      const value = !!next
+      if (pageMounted === value) return
+      pageMounted = value
+      Array.from(pageMountedListeners).forEach((fn) => {
         try {
           fn()
         } catch (err) {
@@ -1293,27 +1321,13 @@ window.__ModuleLoader__.load({
       })
     }
 
-    function subscribeDockPlacement(fn) {
-      dockPlacementListeners.add(fn)
-      return () => dockPlacementListeners.delete(fn)
+    function subscribePageMounted(fn) {
+      pageMountedListeners.add(fn)
+      return () => pageMountedListeners.delete(fn)
     }
 
-    function useDockPlacement() {
-      return useSyncStore(subscribeDockPlacement, () => dockPlacement)
-    }
-
-    let dockMountedFlag = false
-
-    function markDockMounted() {
-      dockMountedFlag = true
-    }
-
-    function isDockMounted() {
-      return dockMountedFlag
-    }
-
-    function resetDockMounted() {
-      dockMountedFlag = false
+    function usePageMounted() {
+      return useSyncStore(subscribePageMounted, () => pageMounted)
     }
 
     let npOpen = false
@@ -1763,62 +1777,60 @@ window.__ModuleLoader__.load({
     /* ------------------------------------------------------------------ *
      * Hero / 登录引导 / 顶栏 / Tabs
      * ------------------------------------------------------------------ */
-    function EngineCard(props) {
+    function EngineProgressBar(props) {
       const t = props.t
-      const [copied, setCopied] = React.useState(false)
+      const install = props.install || {}
+      const phase = install.phase || 'clone'
+      const phaseKey = 'engine.phase.' + (['clone', 'venv', 'pip', 'verify', 'done'].indexOf(phase) >= 0 ? phase : 'clone')
+      return h('div', { className: 'nm-engine-progress', 'data-nm': 'engine-progress', role: 'status' },
+        h(Spinner),
+        h('span', { className: 'nm-engine-progress-title' }, t('engine.installingTitle')),
+        h('span', { className: 'nm-engine-progress-phase' }, t(phaseKey)),
+        h('span', { className: 'nm-engine-progress-bar' }, h('i', null)))
+    }
+
+    function EngineSetupCard(props) {
+      const t = props.t
+      const install = props.install || {}
+      const running = install.state === 'running'
+      const failed = install.state === 'failed'
+      const lines = toArray(install.lines).slice(-160)
+      const logRef = React.useRef(null)
       React.useEffect(() => {
-        if (!copied) return undefined
-        const timer = setTimeout(() => setCopied(false), 1800)
-        return () => clearTimeout(timer)
-      }, [copied])
-      const fallbackCopy = () => {
-        try {
-          const area = document.createElement('textarea')
-          area.value = props.command
-          area.style.position = 'fixed'
-          area.style.opacity = '0'
-          document.body.appendChild(area)
-          area.select()
-          document.execCommand('copy')
-          area.remove()
-        } catch (err) {
-          /* 剪贴板不可用时用户仍可手动选中命令 */
-        }
-        setCopied(true)
-      }
-      const copy = () => {
-        try {
-          if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-            navigator.clipboard.writeText(props.command).then(() => setCopied(true)).catch(fallbackCopy)
-            return
-          }
-        } catch (err) {
-          /* fall through */
-        }
-        fallbackCopy()
-      }
-      return h('div', { className: 'nm-engine', role: 'alert' },
+        const node = logRef.current
+        if (node) node.scrollTop = node.scrollHeight
+      }, [lines.length, install.state])
+      const phase = install.phase || ''
+      const phaseKey = phase && phase !== 'done' && phase !== 'failed' ? 'engine.phase.' + phase : ''
+      return h('div', { className: 'nm-engine', 'data-nm': 'engine-setup', role: 'alert' },
         h('div', { className: 'nm-engine-head' },
           h('span', { className: 'nm-engine-icon' }, h(Icon, { name: 'alert', size: 18 })),
           h('div', { className: 'nm-engine-titles' },
-            h('div', { className: 'nm-engine-title' }, t('engine.title')),
-            h('div', { className: 'nm-engine-desc' }, t('engine.desc')))),
-        h('div', { className: 'nm-engine-body' },
-          h('div', { className: 'nm-engine-label' }, t('engine.fix')),
-          h('div', { className: 'nm-engine-codewrap' },
-            h('code', { className: 'nm-engine-code' }, props.command),
-            h('button', {
-              type: 'button',
-              className: cx('nm-btn sm nm-engine-copy', copied && 'is-copied'),
-              onClick: copy,
-            }, copied ? t('engine.copied') : t('engine.copy')))),
+            h('div', { className: 'nm-engine-title' },
+              running ? t('engine.installingTitle') : failed ? t('engine.installFailed') : t('engine.title')),
+            h('div', { className: 'nm-engine-desc' },
+              running ? t('engine.installingDesc') : failed ? (install.error || t('engine.installFailed')) : t('engine.desc')))),
+        (running || failed || lines.length)
+          ? h('div', { className: 'nm-engine-body' },
+            h('div', { className: 'nm-engine-label' }, phaseKey ? t(phaseKey) : t('engine.installFailed')),
+            h('pre', {
+              className: 'nm-engine-log',
+              'data-nm': 'engine-log',
+              ref: logRef,
+            }, lines.length ? lines.join('\n') : (running ? t('engine.wait') : (install.error || t('engine.wait')))),
+            running ? h('span', { className: 'nm-engine-progress-bar is-inline' }, h('i', null)) : null)
+          : null,
         h('div', { className: 'nm-engine-foot' },
-          h('span', { className: 'nm-engine-hint' }, t('engine.hint')),
-          h('button', {
-            type: 'button',
-            className: 'nm-btn sm accent',
-            onClick: props.onRetry,
-          }, t('action.retry'))))
+          h('span', { className: 'nm-engine-hint' }, running ? t('engine.installingDesc') : t('engine.hint')),
+          running
+            ? null
+            : h('button', {
+              type: 'button',
+              className: 'nm-btn sm accent',
+              'data-nm': failed ? 'engine-retry' : 'engine-install',
+              disabled: !!props.starting,
+              onClick: props.onInstall,
+            }, failed ? t('engine.retryInstall') : t('engine.install'))))
     }
 
     function Hero(props) {
@@ -2460,22 +2472,6 @@ window.__ModuleLoader__.load({
         : h('div', { className: 'nm-queue-empty' }, t('player.queueEmpty')))
     }
 
-    /* shell.bottom 的包装：标记真正挂载；若 watchdog 提前回退了也能自愈回停靠 */
-    function BottomDock() {
-      React.useEffect(() => {
-        markDockMounted()
-        if (dockPlacement === 'float') setDockPlacement('bottom')
-      }, [])
-      return h(PlayerDock)
-    }
-
-    /* shell.overlay 的常驻占位：只有回退悬浮时才渲染真正的播放条（正常停靠时为 null） */
-    function OverlayDock() {
-      const placement = useDockPlacement()
-      if (placement !== 'float') return null
-      return h(PlayerDock)
-    }
-
     function QualityMenu(props) {
       const t = props.t
       const snapshot = usePlayerState()
@@ -2518,7 +2514,6 @@ window.__ModuleLoader__.load({
     function PlayerDock() {
       const t = useT()
       const snapshot = usePlayerState()
-      const placement = useDockPlacement()
       const auth = useAuthInfo()
       const [collapsed, setCollapsed] = React.useState(false)
       const [qualityOpen, setQualityOpen] = React.useState(false)
@@ -2547,7 +2542,6 @@ window.__ModuleLoader__.load({
       const track = snapshot.current
       const duration = snapshot.duration || Number(track.duration) || 0
       const playing = snapshot.playing
-      const bottom = placement === 'bottom'
       const toastKey = snapshot.toast
       const toggleLabel = playing ? t('action.pause') : t('action.play')
       const qualityShort = snapshot.actualBr
@@ -2555,22 +2549,17 @@ window.__ModuleLoader__.load({
         : qualityLabel(snapshot.quality || 'auto', t)
 
       return h('div', {
-        className: cx(
-          'nm-dock-root',
-          bottom ? 'is-bottom' : 'is-float',
-          collapsed && 'is-collapsed',
-          snapshot.queueOpen && 'queue-open'
-        ),
+        className: cx('nm-dock-root', 'is-inline', snapshot.queueOpen && 'queue-open'),
         'data-nm': 'player-state',
         'data-playing': playing ? 'true' : 'false',
-        'data-dock': placement,
+        'data-dock': 'panel',
       },
       snapshot.queueOpen ? h(QueuePanel, { t }) : null,
       toastKey ? h('div', { className: 'nm-dock-toast', role: 'status' }, t('toast.' + toastKey)) : null,
       h('div', {
-        className: cx('nm-dock', 'is-' + placement, collapsed && 'is-collapsed'),
+        className: 'nm-dock is-inline',
         'data-nm': 'dock',
-        'data-dock': placement,
+        'data-dock': 'panel',
       },
       h('div', { className: 'nm-dock-inner', 'data-nm': 'player' },
         h('button', {
@@ -2670,15 +2659,7 @@ window.__ModuleLoader__.load({
             'data-nm': 'dock-expand',
             onClick: enterNowPlayingFromDock,
           }, h(Icon, { name: 'expand', size: 14 })),
-          bottom
-            ? null
-            : h('button', {
-              type: 'button',
-              className: 'nm-icon-btn',
-              title: collapsed ? t('player.expand') : t('player.collapse'),
-              'aria-label': collapsed ? t('player.expand') : t('player.collapse'),
-              onClick: () => setCollapsed((value) => !value),
-            }, h(Icon, { name: collapsed ? 'up' : 'down', size: 14 }))))))
+          null))))
     }
 
     /* ------------------------------------------------------------------ *
@@ -2833,18 +2814,51 @@ window.__ModuleLoader__.load({
         line.translation ? h('span', { className: 'nm-lyric-translation' }, line.translation) : null))
       })()
 
-      return h('div', {
-        className: 'nm-np',
-        'data-nm': 'nowplaying',
-        'data-mode': mode,
-      },
-      h('div', {
-        className: 'nm-np-bg',
-        'aria-hidden': 'true',
-        style: cover ? { backgroundImage: 'url("' + cover + '")' } : undefined,
-      }),
-      h('div', { className: 'nm-np-scrim', 'aria-hidden': 'true' }),
-      h('div', { className: 'nm-np-top' },
+      const metaBlock = h('div', { className: 'nm-np-meta' },
+        h('div', { className: 'nm-np-eyebrow' },
+          h('span', { className: 'nm-np-eyebrow-dot' }),
+          track.vip ? t('vip') : t('np.title')),
+        h('h1', { className: 'nm-np-title', title: track.name }, track.name || t('state.unknown')),
+        h('div', { className: 'nm-np-sub' }, trackArtists(track) || ''),
+        track.album ? h('div', { className: 'nm-np-album' }, t('np.album') + ' · ' + track.album) : null)
+
+      const controlsBlock = (compact) => h('div', { className: cx('nm-np-controls', compact && 'is-compact') },
+        h('button', {
+          type: 'button',
+          className: 'nm-icon-btn nm-np-ctrl',
+          title: t('action.prev'),
+          'aria-label': t('action.prev'),
+          'data-nm': 'np-prev',
+          onClick: () => player.prev(),
+        }, h(Icon, { name: 'prev', size: compact ? 16 : 20 })),
+        h('button', {
+          type: 'button',
+          className: cx('nm-np-play', compact && 'is-compact', snapshot.loading && 'is-loading'),
+          title: toggleLabel,
+          'aria-label': toggleLabel,
+          'data-nm': 'np-play',
+          onClick: () => player.toggle(),
+        }, snapshot.loading && !playing ? h(Spinner) : h(Icon, { name: playing ? 'pause' : 'play', size: compact ? 17 : 22 })),
+        h('button', {
+          type: 'button',
+          className: 'nm-icon-btn nm-np-ctrl',
+          title: t('action.next'),
+          'aria-label': t('action.next'),
+          'data-nm': 'np-next',
+          onClick: () => player.next(false),
+        }, h(Icon, { name: 'next', size: compact ? 16 : 20 })))
+
+      const progressBlock = h('div', { className: 'nm-np-progress' },
+        h('span', { className: 'nm-progress-time' }, fmtTime(position)),
+        h(Slider, {
+          value: duration ? Math.min(position, duration) / duration : 0,
+          label: t('player.progress'),
+          valueText: fmtTime(position) + ' / ' + fmtTime(duration),
+          onCommit: (ratio) => player.seekRatio(ratio),
+        }),
+        h('span', { className: 'nm-progress-time is-right' }, fmtTime(duration)))
+
+      const topBar = h('div', { className: 'nm-np-top' },
         h('button', {
           ref: backRef,
           type: 'button',
@@ -2898,76 +2912,167 @@ window.__ModuleLoader__.load({
             title: t('action.queue'),
             'aria-label': t('action.queue'),
             onClick: () => player.toggleQueue(),
-          }, h(Icon, { name: 'queue', size: 16 })))),
-      h('div', { className: 'nm-np-body' },
-        h('div', { className: 'nm-np-left' },
-          h('div', { className: 'nm-np-art', 'data-nm': 'np-mode', 'data-mode': mode },
-            mode === 'vinyl'
-              ? h(Vinyl, { track, playing })
-              : h('div', { className: 'nm-np-cover-art' },
-                h(Cover, { src: track.cover, name: track.name, eager: true }))),
-          h('div', { className: 'nm-np-meta' },
-            h('div', { className: 'nm-np-eyebrow' },
-              h('span', { className: 'nm-np-eyebrow-dot' }),
-              track.vip ? t('vip') : t('np.title')),
-            h('h1', { className: 'nm-np-title', title: track.name }, track.name || t('state.unknown')),
-            h('div', { className: 'nm-np-sub' }, trackArtists(track) || ''),
-            track.album ? h('div', { className: 'nm-np-album' }, t('np.album') + ' · ' + track.album) : null),
-          h('div', { className: 'nm-np-controls' },
-            h('button', {
-              type: 'button',
-              className: 'nm-icon-btn nm-np-ctrl',
-              title: t('action.prev'),
-              'aria-label': t('action.prev'),
-              'data-nm': 'np-prev',
-              onClick: () => player.prev(),
-            }, h(Icon, { name: 'prev', size: 20 })),
-            h('button', {
-              type: 'button',
-              className: cx('nm-np-play', snapshot.loading && 'is-loading'),
+          }, h(Icon, { name: 'queue', size: 16 }))))
+
+      const stage = mode === 'vinyl'
+        ? h('div', { className: 'nm-np-stage is-vinyl', 'data-nm': 'np-mode', 'data-mode': 'vinyl' },
+          h('div', { className: 'nm-np-vinyl-col' },
+            h('div', {
+              className: 'nm-np-art',
+              role: 'button',
+              tabIndex: 0,
               title: toggleLabel,
               'aria-label': toggleLabel,
-              'data-nm': 'np-play',
               onClick: () => player.toggle(),
-            }, snapshot.loading && !playing ? h(Spinner) : h(Icon, { name: playing ? 'pause' : 'play', size: 22 })),
-            h('button', {
-              type: 'button',
-              className: 'nm-icon-btn nm-np-ctrl',
-              title: t('action.next'),
-              'aria-label': t('action.next'),
-              'data-nm': 'np-next',
-              onClick: () => player.next(false),
-            }, h(Icon, { name: 'next', size: 20 }))),
-          h('div', { className: 'nm-np-progress' },
-            h('span', { className: 'nm-progress-time' }, fmtTime(position)),
-            h(Slider, {
-              value: duration ? Math.min(position, duration) / duration : 0,
-              label: t('player.progress'),
-              valueText: fmtTime(position) + ' / ' + fmtTime(duration),
-              onCommit: (ratio) => player.seekRatio(ratio),
-            }),
-            h('span', { className: 'nm-progress-time is-right' }, fmtTime(duration))),
-          h('div', { className: 'nm-np-tools' },
-            h('button', {
-              type: 'button',
-              className: 'nm-icon-btn',
-              title: snapshot.muted ? t('action.unmute') : t('action.mute'),
-              'aria-label': snapshot.muted ? t('action.unmute') : t('action.mute'),
-              onClick: () => player.toggleMute(),
-            }, h(Icon, { name: snapshot.muted ? 'mute' : 'volume', size: 16 })),
-            h(Slider, {
-              value: snapshot.muted ? 0 : snapshot.volume,
-              step: 0.05,
-              label: t('np.volume'),
-              className: 'nm-np-volume',
-              onCommit: (ratio) => player.setVolume(ratio),
-            }),
-            h('span', { className: 'nm-np-quality-hint' }, qualityText))),
-        h('div', { className: 'nm-np-right' },
+              onKeyDown: (event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault()
+                  player.toggle()
+                }
+              },
+            }, h(Vinyl, { track, playing })),
+            metaBlock,
+            controlsBlock(false),
+            progressBlock,
+            h('div', { className: 'nm-np-tools' },
+              h('button', {
+                type: 'button',
+                className: 'nm-icon-btn',
+                title: snapshot.muted ? t('action.unmute') : t('action.mute'),
+                'aria-label': snapshot.muted ? t('action.unmute') : t('action.mute'),
+                onClick: () => player.toggleMute(),
+              }, h(Icon, { name: snapshot.muted ? 'mute' : 'volume', size: 16 })),
+              h(Slider, {
+                value: snapshot.muted ? 0 : snapshot.volume,
+                step: 0.05,
+                label: t('np.volume'),
+                className: 'nm-np-volume',
+                onCommit: (ratio) => player.setVolume(ratio),
+              }),
+              h('span', { className: 'nm-np-quality-hint' }, qualityText))))
+        : h('div', { className: 'nm-np-stage is-lyrics', 'data-nm': 'np-mode', 'data-mode': 'lyrics' },
           h('div', { className: 'nm-np-lyrics-head' },
             h('span', { className: 'nm-np-lyrics-title' }, t('np.lyrics')),
             parsed.translated ? h('span', { className: 'nm-np-lyrics-badge' }, t('np.translated')) : null),
-          h('div', { className: 'nm-np-lyrics', 'data-nm': 'np-lyrics', ref: scrollRef }, lyricsBody))))
+          h('div', { className: 'nm-np-lyrics', 'data-nm': 'np-lyrics', ref: scrollRef }, lyricsBody),
+          h('div', { className: 'nm-np-lyrics-bar' },
+            progressBlock,
+            controlsBlock(true)))
+
+      return h('div', {
+        className: 'nm-np',
+        'data-nm': 'nowplaying',
+        'data-mode': mode,
+      },
+      h('div', {
+        className: 'nm-np-bg',
+        'data-nm': 'np-bg',
+        'aria-hidden': 'true',
+        style: (cover ? { backgroundImage: 'url("' + cover + '")' } : undefined),
+      }),
+      h('div', { className: 'nm-np-scrim', 'aria-hidden': 'true' }),
+      topBar,
+      stage)
+    }
+    /* ------------------------------------------------------------------ *
+     * 侧栏迷你播放器（其它面板时显示）
+     * ------------------------------------------------------------------ */
+    function MiniPlayer(props) {
+      const t = useT()
+      const snapshot = usePlayerState()
+      const wide = !!(props && props.wide)
+      const usePanelInfo = props && props.usePanelInfo
+      const panelMounted = usePageMounted()
+      const hasPanelInfo = typeof usePanelInfo === 'function'
+      let activePanelId = null
+      if (hasPanelInfo) {
+        activePanelId = usePanelInfo((info) => (info ? info.activePanelId : null))
+      }
+      const hidden = hasPanelInfo ? activePanelId === NS : panelMounted
+      if (!snapshot.current || hidden) return null
+      const track = snapshot.current
+      const duration = snapshot.duration || Number(track.duration) || 0
+      const pct = duration ? Math.min(100, Math.round(((snapshot.position || 0) / duration) * 100)) : 0
+      const playing = snapshot.playing
+      const toggleLabel = playing ? t('action.pause') : t('action.play')
+      const open = () => {
+        openPanel()
+        openNowPlaying()
+      }
+      const cover = h('span', { className: 'nm-mini-cover', 'data-nm': 'mini-cover' },
+        h(Cover, { src: track.cover, name: track.name, eager: true }))
+      const progress = h('span', { className: 'nm-mini-progress' }, h('i', { style: { width: pct + '%' } }))
+
+      if (!wide) {
+        return h('button', {
+          type: 'button',
+          className: 'nm-mini is-rail',
+          'data-nm': 'mini-player',
+          title: track.name,
+          'aria-label': t('np.open'),
+          onClick: open,
+        }, cover, progress)
+      }
+
+      return h('div', { className: 'nm-mini', 'data-nm': 'mini-player' },
+        h('button', {
+          type: 'button',
+          className: 'nm-mini-cover-btn',
+          title: t('np.open'),
+          'aria-label': t('np.open'),
+          onClick: open,
+        }, cover),
+        h('button', {
+          type: 'button',
+          className: 'nm-mini-text',
+          title: track.name,
+          onClick: open,
+        },
+        h('span', { className: 'nm-mini-name' }, track.name),
+        h('span', { className: 'nm-mini-artist' }, trackArtists(track))),
+        h('div', { className: 'nm-mini-controls' },
+          h('button', {
+            type: 'button',
+            className: 'nm-mini-ctrl',
+            'data-nm': 'mini-prev',
+            title: t('action.prev'),
+            'aria-label': t('action.prev'),
+            onClick: () => player.prev(),
+          }, h(Icon, { name: 'prev', size: 12 })),
+          h('button', {
+            type: 'button',
+            className: 'nm-mini-toggle',
+            'data-nm': 'mini-toggle',
+            title: toggleLabel,
+            'aria-label': toggleLabel,
+            onClick: () => player.toggle(),
+          }, h(Icon, { name: playing ? 'pause' : 'play', size: 13 })),
+          h('button', {
+            type: 'button',
+            className: 'nm-mini-ctrl',
+            'data-nm': 'mini-next',
+            title: t('action.next'),
+            'aria-label': t('action.next'),
+            onClick: () => player.next(false),
+          }, h(Icon, { name: 'next', size: 12 })),
+          h('div', { className: 'nm-mini-volume-wrap' },
+            h('button', {
+              type: 'button',
+              className: 'nm-mini-ctrl',
+              'data-nm': 'mini-volume',
+              title: snapshot.muted ? t('action.unmute') : t('action.mute'),
+              'aria-label': snapshot.muted ? t('action.unmute') : t('action.mute'),
+              onClick: () => player.toggleMute(),
+            }, h(Icon, { name: snapshot.muted ? 'mute' : 'volume', size: 12 })),
+            h('div', { className: 'nm-mini-volume-pop' },
+              h(Slider, {
+                value: snapshot.muted ? 0 : snapshot.volume,
+                step: 0.05,
+                label: t('action.volume'),
+                className: 'nm-mini-volume-slider',
+                onCommit: (ratio) => player.setVolume(ratio),
+              })))),
+        progress)
     }
 
     /* ------------------------------------------------------------------ *
@@ -2986,6 +3091,7 @@ window.__ModuleLoader__.load({
     function Page() {
       const t = useT()
       const rootRef = React.useRef(null)
+      const scrollRef = React.useRef(null)
       const [tab, setTab] = React.useState('recommend')
       const [stack, setStack] = React.useState([])
       const [query, setQuery] = React.useState('')
@@ -2995,7 +3101,23 @@ window.__ModuleLoader__.load({
       const [authVersion, setAuthVersion] = React.useState(0)
       const [toast, setToast] = React.useState(null)
       const npIsOpen = useNpOpen()
-      const dockPlace = useDockPlacement()
+      const [install, setInstall] = React.useState({ state: 'idle', phase: '', lines: [], error: '' })
+      const [installStarting, setInstallStarting] = React.useState(false)
+      const installAlive = React.useRef(true)
+      const installTimer = React.useRef(null)
+
+      React.useEffect(() => {
+        setPageMounted(true)
+        return () => setPageMounted(false)
+      }, [])
+
+      React.useEffect(() => {
+        installAlive.current = true
+        return () => {
+          installAlive.current = false
+          if (installTimer.current) clearTimeout(installTimer.current)
+        }
+      }, [])
 
       const debouncedQuery = useDebounced(String(query || '').trim(), 320)
       const status = useStatus()
@@ -3025,6 +3147,66 @@ window.__ModuleLoader__.load({
         setAuthInfo({ authed: !!data.authed, vip: !!(data.vipType && Number(data.vipType) > 0) })
       }, [status.data])
 
+      /* 引擎安装状态：跟随 /status 的 install 字段 */
+      React.useEffect(() => {
+        const info = status.data && status.data.install
+        if (!info) return
+        setInstall((prev) => {
+          if (prev.state === 'running') return prev
+          return {
+            state: info.state || prev.state,
+            phase: info.phase || prev.phase,
+            lines: Array.isArray(info.tail) && info.tail.length ? info.tail.slice(-160) : prev.lines,
+            error: info.error || '',
+          }
+        })
+      }, [status.data])
+
+      const finishInstall = () => {
+        setInstall((prev) => ({ ...prev, state: 'done', phase: 'done' }))
+        apiPost('/refresh').catch(() => {})
+        status.refresh()
+        home.reload()
+      }
+
+      const pollInstallLog = () => {
+        if (!installAlive.current) return
+        apiGet('/setup/install/log').then((data) => {
+          if (!installAlive.current) return
+          const lines = toArray(data && data.lines).slice(-160)
+          const next = {
+            state: (data && data.state) || 'running',
+            phase: (data && data.phase) || '',
+            lines,
+            error: (data && data.error) || '',
+          }
+          setInstall(next)
+          if (next.state === 'running') {
+            installTimer.current = setTimeout(pollInstallLog, 800)
+            return
+          }
+          if (next.state === 'done' || (data && data.installed)) finishInstall()
+        }).catch((err) => {
+          if (!installAlive.current) return
+          setInstall({ state: 'failed', phase: 'failed', lines: [], error: (err && err.message) || t('engine.installFailed') })
+        })
+      }
+
+      const startInstall = () => {
+        if (installStarting || install.state === 'running') return
+        setInstallStarting(true)
+        setInstall({ state: 'running', phase: 'clone', lines: [], error: '' })
+        apiPost('/setup/install').then(() => {
+          if (!installAlive.current) return
+          installTimer.current = setTimeout(pollInstallLog, 800)
+        }).catch((err) => {
+          if (!installAlive.current) return
+          setInstall({ state: 'failed', phase: 'failed', lines: [], error: (err && err.message) || t('engine.installFailed') })
+        }).then(() => {
+          if (installAlive.current) setInstallStarting(false)
+        })
+      }
+
       /* 桥/引擎启动完成前首次 /home 可能失败：就绪后自动补拉一次 */
       const homeRetried = React.useRef(false)
       const bridgeReady = !!(status.data && status.data.bridge === 'ready')
@@ -3043,7 +3225,7 @@ window.__ModuleLoader__.load({
       const detailKey = detail ? detail.kind + ':' + detail.id : ''
 
       React.useEffect(() => {
-        const node = rootRef.current
+        const node = scrollRef.current
         if (!node) return
         try {
           node.scrollTop = 0
@@ -3065,8 +3247,15 @@ window.__ModuleLoader__.load({
       const minePlaylists = toArray(mine.data && mine.data.playlists)
 
       const showLoginBanner = !authed && !detail
-      const engineBroken = !!(status.data && (status.data.bridge === 'error' || status.data.engine === 'missing'))
-      const showBody = !engineBroken || !!home.data
+      const engineInfo = (status.data && status.data.engine) || ''
+      const installInfo = (status.data && status.data.install) || {}
+      const engineReady = engineInfo === 'installed' || !!installInfo.installed || install.state === 'done'
+      const engineInstalling = !engineReady && (install.state === 'running' || engineInfo === 'installing' || installInfo.state === 'running')
+      const engineBroken = !engineReady && !engineInstalling && !!(status.data && (
+        status.data.bridge === 'error' || engineInfo === 'missing' || engineInfo === 'failed' ||
+        installInfo.state === 'failed' || install.state === 'failed'
+      ))
+      const showBody = !!home.data || (!engineBroken && !engineInstalling)
 
       const openLogin = () => setLoginOpen(true)
 
@@ -3229,7 +3418,7 @@ window.__ModuleLoader__.load({
           loading: home.loading && !home.data,
           onPlayAll: playDaily,
         }),
-        home.error && !engineBroken
+        home.error && !engineBroken && !engineInstalling
           ? h('div', { className: 'nm-section' },
             h(StateBox, {
               kind: 'error',
@@ -3385,37 +3574,44 @@ window.__ModuleLoader__.load({
         return h('div', {
           className: 'nm-root nm-np-root',
           'data-nm': 'root',
-          'data-dock-mode': dockPlace,
           ref: rootRef,
         },
-        h(NowPlaying, { t }),
+        h('div', { className: 'nm-scroll', 'data-nm': 'scroll', ref: scrollRef },
+          h(NowPlaying, { t })),
+        h(PlayerDock),
         toast ? h('div', { className: 'nm-toast', role: 'status' }, toast) : null)
       }
 
       return h('div', {
         className: 'nm-root',
         'data-nm': 'root',
-        'data-dock-mode': dockPlace,
         ref: rootRef,
       },
-        h('div', { className: 'nm-wrap' },
-          h(Header, {
-            t,
-            status,
-            query,
-            onQuery: handleQuery,
-            onRefresh: handleRefresh,
-            refreshing: home.loading,
-            onLogin: openLogin,
-            onLogout: handleLogout,
-          }),
-          h(Tabs, { t, tab, onChange: selectTab }),
-          h('div', { className: 'nm-content' },
-            engineBroken
-              ? h(EngineCard, { t, command: ENGINE_COMMAND, onRetry: handleRefresh })
-              : null,
-            showLoginBanner && !engineBroken ? h(LoginBanner, { t, onLogin: openLogin }) : null,
-            showBody || detail ? body : null)),
+        h('div', { className: 'nm-scroll', 'data-nm': 'scroll', ref: scrollRef },
+          h('div', { className: 'nm-header-shell', 'data-nm': 'header' },
+            h(Header, {
+              t,
+              status,
+              query,
+              onQuery: handleQuery,
+              onRefresh: handleRefresh,
+              refreshing: home.loading,
+              onLogin: openLogin,
+              onLogout: handleLogout,
+            })),
+          h('div', { className: 'nm-wrap' },
+            h(Tabs, { t, tab, onChange: selectTab }),
+            h('div', { className: 'nm-content' },
+              engineInstalling ? h(EngineProgressBar, { t, install }) : null,
+              (engineBroken || engineInstalling) ? h(EngineSetupCard, {
+                t,
+                install,
+                starting: installStarting,
+                onInstall: startInstall,
+              }) : null,
+              showLoginBanner && !engineBroken ? h(LoginBanner, { t, onLogin: openLogin }) : null,
+              showBody || detail ? body : null))),
+        h(PlayerDock),
         loginOpen
           ? h(LoginModal, {
             t,
@@ -3450,7 +3646,7 @@ window.__ModuleLoader__.load({
      * 样式：全部从 DSH 主题 token 派生，浅色 / 深色自动适配
      * ------------------------------------------------------------------ */
     const CSS = `
-    .nm-root,.nm-dock-root,.nm-modal-root{
+    .nm-root,.nm-dock-root,.nm-modal-root,.nm-mini{
       --nm-t1:var(--dsw-alias-label-primary,#1d1d1f);
       --nm-t2:var(--dsw-alias-label-secondary,#6e6e73);
       --nm-t3:var(--dsw-alias-label-tertiary,#8e8e93);
@@ -3476,25 +3672,26 @@ window.__ModuleLoader__.load({
       font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","PingFang SC","Helvetica Neue","Segoe UI",sans-serif;
       -webkit-font-smoothing:antialiased;
     }
-    .nm-root *,.nm-dock-root *,.nm-modal-root *{box-sizing:border-box}
-    .nm-root button,.nm-dock-root button,.nm-modal-root button{font:inherit}
-    .nm-root :focus-visible,.nm-dock-root :focus-visible,.nm-modal-root :focus-visible{
+    .nm-root *,.nm-dock-root *,.nm-modal-root *,.nm-mini *,.nm-mini{box-sizing:border-box}
+    .nm-root button,.nm-dock-root button,.nm-modal-root button,.nm-mini button{font:inherit}
+    .nm-root :focus-visible,.nm-dock-root :focus-visible,.nm-modal-root :focus-visible,.nm-mini :focus-visible{
       outline:2px solid var(--dsw-focus-ring-color,var(--nm-accent));outline-offset:2px;
     }
     .nm-root{
-      height:100%;overflow-y:auto;overflow-x:hidden;
-      padding-top:var(--dsh-frame-top-clearance,48px);padding-bottom:96px;
+      height:100%;display:flex;flex-direction:column;overflow:hidden;
       color:var(--nm-t1);font-size:13px;line-height:1.5;
-      scrollbar-width:thin;scrollbar-color:var(--dsw-alias-scrollbar-bg-l2,var(--nm-fill2)) transparent;
       background:
         radial-gradient(1100px 420px at 12% -8%,color-mix(in srgb,var(--nm-accent) 10%,transparent),transparent 68%),
         radial-gradient(900px 400px at 98% 0%,color-mix(in srgb,var(--nm-accent-2) 7%,transparent),transparent 70%);
     }
-    .nm-root[data-dock-mode="float"]{padding-bottom:96px}
-    .nm-root[data-dock-mode="bottom"]{padding-bottom:16px}
-    .nm-root.nm-np-root{padding-top:0;padding-bottom:0;overflow:hidden}
+    .nm-scroll{
+      flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;
+      scrollbar-width:thin;scrollbar-color:var(--dsw-alias-scrollbar-bg-l2,var(--nm-fill2)) transparent;
+    }
+    .nm-root.nm-np-root{padding:0;overflow:hidden}
+    .nm-np-root .nm-scroll{overflow:hidden}
     .nm-wrap{max-width:1480px;margin:0 auto;padding:0 28px}
-    .nm-content{padding-bottom:8px;animation:nm-fade .32s ease both}
+    .nm-content{padding:14px 0 28px;animation:nm-fade .32s ease both}
 
     /* ---------- 图标 / 通用按钮 ---------- */
     .nm-ico{display:block;flex:none}
@@ -3541,25 +3738,28 @@ window.__ModuleLoader__.load({
     .nm-inline-link{color:inherit;cursor:pointer;border-radius:4px}
     .nm-inline-link:hover{color:var(--nm-t1);text-decoration:underline;text-underline-offset:2px}
 
-    /* ---------- 顶栏 ---------- */
-    .nm-header{
-      position:sticky;top:0;z-index:12;margin:0 -12px;padding:12px 12px 6px;
-      background:linear-gradient(to bottom,color-mix(in srgb,var(--nm-bg) 88%,transparent) 40%,color-mix(in srgb,var(--nm-bg) 62%,transparent) 78%,transparent);
-      backdrop-filter:blur(18px) saturate(170%);-webkit-backdrop-filter:blur(18px) saturate(170%);
+    /* ---------- 顶栏（最高处，不透明，不与 Harness 框架露缝） ---------- */
+    .nm-header-shell{
+      position:sticky;top:0;z-index:30;width:100%;
+      padding-top:calc(var(--dsh-frame-top-clearance,0px) + 8px);
+      padding-bottom:8px;
+      background:color-mix(in srgb,var(--nm-bg) 96%,transparent);
+      border-bottom:1px solid var(--nm-line2);
+      backdrop-filter:blur(20px) saturate(160%);-webkit-backdrop-filter:blur(20px) saturate(160%);
     }
-    .nm-header-row{display:flex;align-items:center;gap:16px}
-    .nm-brand{display:flex;align-items:center;gap:11px;min-width:0}
+    .nm-header{max-width:1480px;margin:0 auto;padding:0 28px;min-height:36px;display:flex;align-items:center}
+    .nm-header-row{display:flex;align-items:center;gap:14px;width:100%}
+    .nm-brand{display:flex;align-items:center;gap:9px;min-width:0}
     .nm-logo{
-      width:26px;height:26px;border-radius:6px;flex:none;display:block;overflow:hidden;
-      box-shadow:0 4px 12px -6px color-mix(in srgb,var(--nm-accent) 70%,transparent);
+      width:22px;height:22px;border-radius:5px;flex:none;display:block;overflow:hidden;
     }
     .nm-logo img{width:100%;height:100%;object-fit:cover;display:block;border-radius:inherit}
-    .nm-brand-text{min-width:0}
-    .nm-brand-title{font-size:17px;font-weight:700;letter-spacing:-.02em;line-height:1.15;white-space:nowrap}
-    .nm-brand-sub{font-size:11px;color:var(--nm-t3);letter-spacing:.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .nm-brand-text{min-width:0;display:flex;align-items:center;gap:8px}
+    .nm-brand-title{font-size:15.5px;font-weight:700;letter-spacing:-.015em;line-height:1.15;white-space:nowrap}
+    .nm-brand-sub{font-size:10.5px;color:var(--nm-t3);letter-spacing:.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
     .nm-header-tools{margin-left:auto;display:flex;align-items:center;gap:8px;min-width:0}
     .nm-search{
-      display:flex;align-items:center;gap:7px;height:34px;width:250px;min-width:0;
+      display:flex;align-items:center;gap:7px;height:32px;width:238px;min-width:0;
       padding:0 12px;border-radius:999px;border:1px solid var(--nm-line);
       background:color-mix(in srgb,var(--nm-l1) 55%,transparent);color:var(--nm-t3);
       transition:border-color 180ms ease,box-shadow 180ms ease,background 180ms ease,width 200ms ease;
@@ -3582,12 +3782,12 @@ window.__ModuleLoader__.load({
     .nm-refresh{margin-left:2px}
     .nm-account{display:flex;align-items:center;gap:6px;min-width:0}
     .nm-account-profile{display:flex;align-items:center;gap:7px;min-width:0;padding:2px 4px 2px 2px;border-radius:999px}
-    .nm-avatar{width:28px;height:28px;border-radius:50%;object-fit:cover;flex:none;background:var(--nm-fill2)}
+    .nm-avatar{width:26px;height:26px;border-radius:50%;object-fit:cover;flex:none;background:var(--nm-fill2)}
     .nm-avatar-fb{display:grid;place-items:center;font-size:12px;font-weight:700;color:var(--nm-on-accent);background:linear-gradient(140deg,var(--nm-accent),color-mix(in srgb,var(--nm-accent-2) 78%,var(--nm-accent)))}
     .nm-account-name{font-size:12.5px;font-weight:600;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
     /* ---------- Tabs ---------- */
-    .nm-tabs{display:flex;align-items:center;gap:2px;margin:2px 0 0;padding-bottom:2px;border-bottom:1px solid var(--nm-line2);overflow-x:auto;scrollbar-width:none}
+    .nm-tabs{display:flex;align-items:center;gap:2px;margin:0;padding:6px 0 2px;border-bottom:1px solid var(--nm-line2);overflow-x:auto;scrollbar-width:none}
     .nm-tabs::-webkit-scrollbar{display:none}
     .nm-tab{
       position:relative;border:0;background:none;color:var(--nm-t2);cursor:pointer;
@@ -3629,6 +3829,24 @@ window.__ModuleLoader__.load({
     .nm-engine-copy.is-copied{color:var(--nm-success);border-color:color-mix(in srgb,var(--nm-success) 40%,transparent)}
     .nm-engine-foot{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
     .nm-engine-hint{font-size:11px;color:var(--nm-t3);flex:1;min-width:140px}
+    .nm-engine-log{
+      margin:0;max-height:150px;overflow:auto;padding:10px 13px;border-radius:11px;
+      background:color-mix(in srgb,var(--nm-t1) 7%,transparent);border:1px solid var(--nm-line2);
+      font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;line-height:1.55;color:var(--nm-t2);
+      white-space:pre-wrap;word-break:break-all;scrollbar-width:thin;
+    }
+    .nm-engine-progress{
+      display:flex;align-items:center;gap:9px;margin-top:14px;padding:8px 13px;border-radius:12px;
+      border:1px solid var(--nm-accent-line);background:var(--nm-accent-soft);font-size:11.5px;color:var(--nm-t2);
+      overflow:hidden;
+    }
+    .nm-engine-progress .nm-spinner{color:var(--nm-accent)}
+    .nm-engine-progress-title{font-weight:650;color:var(--nm-t1);white-space:nowrap}
+    .nm-engine-progress-phase{color:var(--nm-accent);font-weight:650;white-space:nowrap}
+    .nm-engine-progress-bar{position:relative;flex:1;min-width:60px;height:3px;border-radius:999px;background:color-mix(in srgb,var(--nm-accent) 18%,transparent);overflow:hidden}
+    .nm-engine-progress-bar>i{position:absolute;top:0;bottom:0;width:34%;border-radius:999px;background:var(--nm-accent);animation:nm-indeterminate 1.3s ease-in-out infinite}
+    .nm-engine-progress-bar.is-inline{margin-top:10px;display:block}
+    @keyframes nm-indeterminate{0%{left:-34%}100%{left:100%}}
     .nm-login-banner{
       display:flex;align-items:center;gap:14px;margin-top:16px;padding:14px 18px;border-radius:18px;
       border:1px solid color-mix(in srgb,var(--nm-accent) 22%,var(--nm-line2));
@@ -3859,34 +4077,17 @@ window.__ModuleLoader__.load({
     .nm-pill-tab.is-active{background:var(--nm-l2);color:var(--nm-t1);box-shadow:0 2px 8px rgba(0,0,0,.12)}
     .nm-search-body{margin-top:20px}
 
-    /* ---------- 播放条（shell.bottom 停靠 / shell.overlay 悬浮回退） ---------- */
-    .nm-dock-root{
-      font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","PingFang SC","Helvetica Neue","Segoe UI",sans-serif;
-      -webkit-font-smoothing:antialiased;
-    }
-    .nm-dock-root.is-float{
-      position:fixed;left:0;right:0;bottom:0;z-index:20;pointer-events:none;
-      display:flex;justify-content:center;align-items:flex-end;padding:0 20px 14px;
-    }
-    .nm-dock-root.is-float .nm-dock{
-      pointer-events:auto;position:relative;width:min(1080px,calc(100vw - 40px));min-height:64px;
-      border-radius:20px;border:1px solid var(--nm-line);
-      background:color-mix(in srgb,var(--nm-l1) 88%,transparent);
-      box-shadow:var(--nm-shadow-pop),inset 0 1px 0 color-mix(in srgb,var(--nm-t1) 9%,transparent);
-      backdrop-filter:blur(26px) saturate(180%);-webkit-backdrop-filter:blur(26px) saturate(180%);
-    }
-    .nm-dock-root.is-bottom{
-      position:relative;z-index:6;width:100%;
-      background:color-mix(in srgb,var(--nm-l1) 84%,transparent);
+    /* ---------- 面板内播放条（非全局悬浮，占页面底部一行） ---------- */
+    .nm-dock-root.is-inline{
+      flex:none;position:relative;z-index:6;width:100%;
       border-top:1px solid var(--nm-line);
-      box-shadow:0 -12px 30px -28px rgba(0,0,0,.45);
-      backdrop-filter:blur(24px) saturate(180%);-webkit-backdrop-filter:blur(24px) saturate(180%);
+      background:color-mix(in srgb,var(--nm-l1) 92%,transparent);
+      backdrop-filter:blur(22px) saturate(170%);-webkit-backdrop-filter:blur(22px) saturate(170%);
     }
-    .nm-dock-root.is-bottom .nm-dock{width:100%;height:72px;background:none;border:0;box-shadow:none;border-radius:0}
     .nm-dock{position:relative;display:flex;align-items:center}
-    .nm-dock-inner{display:flex;align-items:center;gap:14px;width:100%;min-width:0;height:100%}
-    .nm-dock-root.is-float .nm-dock-inner{padding:9px 14px}
-    .nm-dock-root.is-bottom .nm-dock-inner{max-width:1480px;margin:0 auto;padding:0 28px}
+    .nm-dock.is-inline{width:100%;height:72px;background:none;border:0;box-shadow:none;border-radius:0}
+    .nm-dock-inner{display:flex;align-items:center;gap:14px;width:100%;min-width:0;height:100%;
+      max-width:1480px;margin:0 auto;padding:0 28px}
     .nm-dock-info{
       display:flex;align-items:center;gap:11px;min-width:0;flex:0 1 232px;
       background:none;border:0;padding:0;cursor:pointer;text-align:left;
@@ -3993,9 +4194,13 @@ window.__ModuleLoader__.load({
       color:var(--nm-t1);overflow:hidden;
     }
     .nm-np-bg{
-      position:absolute;inset:-60px;z-index:0;background-size:cover;background-position:center;
-      filter:blur(46px) saturate(150%);opacity:.55;transform:scale(1.18);pointer-events:none;
+      position:absolute;inset:-80px;z-index:0;background-size:cover;background-position:center;
+      background-color:#2a1116;
+      filter:blur(56px) saturate(1.15) brightness(.74);
+      transform:scale(1.14);pointer-events:none;
     }
+    [data-ds-dark-theme] .nm-np-bg{filter:blur(56px) saturate(1.1) brightness(.5)}
+    @media (prefers-color-scheme:dark){.nm-np-bg{filter:blur(56px) saturate(1.1) brightness(.5)}}
     .nm-np-scrim{
       position:absolute;inset:0;z-index:0;pointer-events:none;
       background:
@@ -4019,18 +4224,10 @@ window.__ModuleLoader__.load({
     .nm-np-mode-btn.is-active{background:var(--nm-l2);color:var(--nm-t1);box-shadow:0 2px 8px rgba(0,0,0,.16)}
     .nm-np-quality-btn{max-width:220px}
     .nm-np-quality-btn span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:11.5px}
-    .nm-np-body{
-      position:relative;z-index:2;flex:1;min-height:0;display:grid;
-      grid-template-columns:minmax(0,1.04fr) minmax(320px,.96fr);gap:38px;align-items:stretch;
-      padding-top:10px;
-    }
-    .nm-np[data-mode="lyrics"] .nm-np-body{grid-template-columns:minmax(0,.86fr) minmax(340px,1.14fr)}
-    .nm-np-left{min-width:0;min-height:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px}
-    .nm-np-art{width:100%;min-height:0;display:flex;align-items:center;justify-content:center;flex:1 1 auto}
-    .nm-np-cover-art{
-      width:min(34vh,300px);max-width:100%;aspect-ratio:1;border-radius:20px;overflow:hidden;
-      box-shadow:0 30px 70px -28px rgba(0,0,0,.7);border:1px solid rgba(255,255,255,.08);
-    }
+    .nm-np-stage{position:relative;z-index:2;flex:1;min-height:0;display:flex;flex-direction:column;padding-top:8px}
+    .nm-np-stage.is-vinyl{align-items:center;justify-content:center;overflow-y:auto;overflow-x:hidden;scrollbar-width:none}
+    .nm-np-vinyl-col{flex:1;min-height:0;width:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:13px;padding:4px 0 6px}
+    .nm-np-art{display:flex;align-items:center;justify-content:center;flex:none;cursor:pointer;outline:none;border-radius:50%}
     .nm-np-meta{min-width:0;text-align:center;max-width:640px;width:100%}
     .nm-np-eyebrow{display:flex;align-items:center;justify-content:center;gap:6px;font-size:10.5px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--nm-t3)}
     .nm-np-eyebrow-dot{width:5px;height:5px;border-radius:50%;background:var(--nm-accent);box-shadow:0 0 8px var(--nm-accent)}
@@ -4051,7 +4248,10 @@ window.__ModuleLoader__.load({
     }
     .nm-np-play:hover{transform:scale(1.05);background:color-mix(in srgb,var(--nm-accent) 88%,#000)}
     .nm-np-play:active{transform:scale(.97)}
+    .nm-np-play.is-compact{width:42px;height:42px}
     .nm-np-play .nm-spinner{border-color:color-mix(in srgb,var(--nm-on-accent) 34%,transparent);border-top-color:var(--nm-on-accent)}
+    .nm-np-controls.is-compact{gap:14px}
+    .nm-np-controls.is-compact .nm-np-ctrl{width:34px;height:34px}
     .nm-np-progress{display:flex;align-items:center;gap:12px;width:100%;max-width:560px;flex:none}
     .nm-np-tools{display:flex;align-items:center;justify-content:center;gap:9px;flex:none;color:var(--nm-t3);min-width:0;max-width:100%}
     .nm-np-volume{width:120px;flex:0 0 120px}
@@ -4059,23 +4259,28 @@ window.__ModuleLoader__.load({
       font-size:10.5px;color:var(--nm-t3);border:1px solid var(--nm-line2);border-radius:999px;
       padding:2px 9px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:220px;
     }
-    .nm-np-right{
-      min-width:0;min-height:0;display:flex;flex-direction:column;overflow:hidden;
-      border-radius:22px;border:1px solid var(--nm-line);
-      background:color-mix(in srgb,var(--nm-l1) 58%,transparent);
-      backdrop-filter:blur(22px) saturate(160%);-webkit-backdrop-filter:blur(22px) saturate(160%);
-      box-shadow:var(--nm-shadow-card);
-    }
-    .nm-np-lyrics-head{display:flex;align-items:center;gap:8px;padding:15px 20px 10px;flex:none}
+    .nm-np-stage.is-lyrics{flex:1;min-height:0;padding-top:2px}
+    .nm-np-lyrics-head{display:flex;align-items:center;gap:8px;padding:2px 0 6px;flex:none;max-width:1200px;width:100%;margin:0 auto}
     .nm-np-lyrics-title{font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--nm-t3)}
     .nm-np-lyrics-badge{
       font-size:9.5px;font-weight:700;color:var(--nm-accent);background:var(--nm-accent-soft);
       border:1px solid var(--nm-accent-line);border-radius:999px;padding:1px 7px;
     }
     .nm-np-lyrics{
-      flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;
-      padding:4px 14px 34% 10px;scrollbar-width:thin;scroll-behavior:smooth;
+      flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;scroll-behavior:smooth;
+      padding:10px max(10vw,60px) 28%;scrollbar-width:thin;max-width:1200px;width:100%;margin:0 auto;
     }
+    .nm-np-stage.is-lyrics .nm-lyric-line{max-width:100%;padding:10px 4px}
+    .nm-np-stage.is-lyrics .nm-lyric-text{font-size:clamp(17px,1.9vw,23px);font-weight:600;line-height:1.5}
+    .nm-np-stage.is-lyrics .nm-lyric-translation{font-size:clamp(11.5px,1.2vw,14px);margin-top:2px}
+    .nm-np-stage.is-lyrics .nm-lyric-line.is-active{color:var(--nm-t1)}
+    .nm-np-stage.is-lyrics .nm-lyric-line.is-active .nm-lyric-text{color:var(--nm-accent);font-size:clamp(20px,2.3vw,28px);font-weight:750}
+    .nm-np-stage.is-lyrics .nm-lyric-line.is-active .nm-lyric-translation{color:color-mix(in srgb,var(--nm-accent) 60%,var(--nm-t2))}
+    .nm-np-lyrics-bar{
+      flex:none;width:100%;max-width:1200px;margin:0 auto;padding:6px max(10vw,60px) 4px;
+      display:flex;flex-direction:column;gap:6px;
+    }
+    .nm-np-lyrics-bar .nm-np-progress{max-width:none}
     .nm-lyric-line{
       display:flex;flex-direction:column;gap:3px;padding:9px 12px;border-radius:12px;
       color:var(--nm-t3);cursor:pointer;outline:none;transition:color .18s ease,background .18s ease;
@@ -4090,28 +4295,38 @@ window.__ModuleLoader__.load({
     .nm-np-lyrics-note-title{font-size:15px;font-weight:650;color:var(--nm-t2)}
     .nm-np-lyrics-note-sub{font-size:11.5px;color:var(--nm-t3)}
 
+
     /* ---------- 黑胶 ---------- */
     .nm-vinyl-wrap{position:relative;width:min(40vh,360px);max-width:100%;aspect-ratio:1;flex:none;display:grid;place-items:center}
     .nm-vinyl{
-      position:relative;width:100%;height:100%;border-radius:50%;
+      position:relative;width:100%;height:100%;border-radius:50%;overflow:hidden;
+      clip-path:circle(50% at 50% 50%);
       background:
         radial-gradient(circle at 50% 46%,#232325 0 30%,#141416 58%,#0c0c0d 100%);
       box-shadow:0 34px 80px -34px rgba(0,0,0,.85),inset 0 0 0 1px rgba(255,255,255,.07);
       animation:nm-vinyl-spin 24s linear infinite;animation-play-state:paused;
     }
     .nm-vinyl.is-spinning{animation-play-state:running}
+    .nm-vinyl-disc{
+      position:absolute;inset:0;border-radius:50%;overflow:hidden;clip-path:circle(50% at 50% 50%);
+    }
     .nm-vinyl-grooves{
       position:absolute;inset:3.5%;border-radius:50%;pointer-events:none;
       background:repeating-radial-gradient(circle at 50% 50%,rgba(255,255,255,.055) 0 1px,rgba(255,255,255,0) 1px 4px);
     }
     .nm-vinyl-label{
       position:absolute;left:50%;top:50%;width:35%;aspect-ratio:1;transform:translate(-50%,-50%);
-      border-radius:50%;overflow:hidden;border:2px solid rgba(255,255,255,.1);
+      border-radius:50%;overflow:hidden;clip-path:circle(50% at 50% 50%);
+      border:2px solid rgba(255,255,255,.1);
       box-shadow:0 6px 18px rgba(0,0,0,.55);
     }
+    .nm-vinyl-label .nm-cover,
+    .nm-vinyl-label .nm-cover img{
+      width:100%;height:100%;border-radius:50%;overflow:hidden;clip-path:circle(50% at 50% 50%);object-fit:cover;
+    }
     .nm-vinyl-hole{
-      position:absolute;left:50%;top:50%;width:7px;height:7px;border-radius:50%;transform:translate(-50%,-50%);
-      background:var(--nm-bg);box-shadow:0 0 0 1px rgba(0,0,0,.6);
+      position:absolute;left:50%;top:50%;width:8px;height:8px;border-radius:50%;transform:translate(-50%,-50%);
+      background:var(--nm-bg);box-shadow:0 0 0 1px rgba(0,0,0,.55),0 0 0 5px rgba(0,0,0,.28);
     }
     .nm-tonearm{
       position:absolute;right:-2%;top:-3%;width:46%;height:52%;pointer-events:none;
@@ -4159,6 +4374,55 @@ window.__ModuleLoader__.load({
     .nm-queue-artist{font-size:11px;color:var(--nm-t3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
     .nm-queue-dur{font-size:11px;color:var(--nm-t3);font-variant-numeric:tabular-nums;flex:none}
     .nm-queue-empty{padding:26px;text-align:center;font-size:12px;color:var(--nm-t3)}
+
+    /* ---------- 侧栏迷你播放器（与侧栏其他行同宽、扁平卡片） ---------- */
+    .nm-mini{
+      position:relative;display:flex;align-items:center;gap:7px;
+      width:100%;max-width:none;box-sizing:border-box;height:60px;
+      padding:8px 7px 10px;border-radius:9px;border:1px solid var(--nm-line2);
+      background:color-mix(in srgb,var(--nm-t1) 4%,transparent);
+      overflow:visible;color:var(--nm-t1);text-align:left;
+    }
+    [data-ds-dark-theme] .nm-mini{background:color-mix(in srgb,var(--nm-t1) 6%,transparent)}
+    .nm-mini:hover{background:color-mix(in srgb,var(--nm-t1) 8%,transparent)}
+    .nm-mini-cover-btn{display:block;flex:none;background:none;border:0;padding:0;cursor:pointer;border-radius:9px;overflow:hidden;width:38px;height:38px}
+    .nm-mini-cover{display:block;width:38px;height:38px;border-radius:9px;overflow:hidden;flex:none;box-shadow:0 3px 8px -4px rgba(0,0,0,.5)}
+    .nm-mini-text{
+      flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:0;
+      background:none;border:0;padding:0;cursor:pointer;text-align:left;color:inherit;overflow:hidden;
+    }
+    .nm-mini-name{font-size:11px;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.4}
+    .nm-mini-artist{font-size:9.5px;color:var(--nm-t3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.4}
+    .nm-mini-controls{display:flex;align-items:center;gap:1px;flex:none;min-width:0}
+    .nm-mini-ctrl{
+      width:21px;height:21px;border:0;border-radius:6px;background:none;padding:0;
+      display:grid;place-items:center;color:var(--nm-t2);cursor:pointer;flex:none;
+    }
+    .nm-mini-ctrl:hover{background:var(--nm-fill);color:var(--nm-t1)}
+    .nm-mini-toggle{
+      width:26px;height:26px;border-radius:50%;border:0;display:grid;place-items:center;cursor:pointer;flex:none;
+      background:var(--nm-accent);color:var(--nm-on-accent);
+    }
+    .nm-mini-toggle:hover{background:color-mix(in srgb,var(--nm-accent) 88%,#000)}
+    .nm-mini-volume-wrap{position:relative;display:flex;align-items:center}
+    .nm-mini-volume-pop{
+      position:absolute;right:0;bottom:calc(100% + 6px);width:132px;padding:8px 10px;
+      border-radius:10px;border:1px solid var(--nm-line);background:color-mix(in srgb,var(--nm-l2) 96%,transparent);
+      box-shadow:var(--nm-shadow-pop);backdrop-filter:blur(18px);
+      opacity:0;visibility:hidden;transform:translateY(3px);pointer-events:none;
+      transition:opacity 140ms ease,transform 140ms ease,visibility 140ms;
+      z-index:20;
+    }
+    .nm-mini-volume-wrap:hover .nm-mini-volume-pop,
+    .nm-mini-volume-wrap:focus-within .nm-mini-volume-pop{
+      opacity:1;visibility:visible;transform:none;pointer-events:auto;
+    }
+    .nm-mini-volume-slider{flex:0 0 auto;width:100%;height:14px}
+    .nm-mini-progress{position:absolute;left:1px;right:1px;bottom:0;height:2px;border-radius:0 0 8px 8px;background:color-mix(in srgb,var(--nm-t1) 12%,transparent);overflow:hidden}
+    .nm-mini-progress>i{display:block;height:100%;background:var(--nm-accent);border-radius:0 2px 2px 0}
+    .nm-mini.is-rail{width:34px;max-width:34px;height:38px;padding:3px;justify-content:center;border-radius:9px;overflow:hidden}
+    .nm-mini.is-rail .nm-mini-cover{width:28px;height:28px;border-radius:7px}
+    .nm-mini.is-rail .nm-mini-progress{left:3px;right:3px;bottom:2px;border-radius:2px}
 
     /* ---------- 登录 Modal ---------- */
     .nm-modal-root{
@@ -4217,7 +4481,7 @@ window.__ModuleLoader__.load({
 
     /* ---------- 轻提示 ---------- */
     .nm-toast{
-      position:fixed;left:50%;bottom:104px;transform:translateX(-50%);z-index:40;
+      position:fixed;left:50%;bottom:86px;transform:translateX(-50%);z-index:40;
       padding:8px 16px;border-radius:999px;background:var(--nm-t1);color:var(--nm-bg);
       font-size:12px;font-weight:600;box-shadow:var(--nm-shadow-pop);animation:nm-fade .2s ease both;
       max-width:calc(100vw - 40px);text-align:center;
@@ -4262,10 +4526,9 @@ window.__ModuleLoader__.load({
       .nm-search:focus-within{width:210px}
     }
     @media (max-width:768px){
-      .nm-root[data-dock-mode="float"]{padding-bottom:150px}
-      .nm-root[data-dock-mode="bottom"]{padding-bottom:12px}
       .nm-wrap{padding:0 18px}
-      .nm-header-row{flex-wrap:wrap;gap:10px}
+      .nm-header{padding:0 18px}
+      .nm-header-row{flex-wrap:wrap;gap:8px}
       .nm-header-tools{flex-wrap:wrap;justify-content:flex-end;gap:6px}
       .nm-search{order:5;flex:1 1 100%;width:100%}
       .nm-search:focus-within{width:100%}
@@ -4282,17 +4545,8 @@ window.__ModuleLoader__.load({
       .nm-track-cover{width:38px;height:38px}
       .nm-track-actions{opacity:1}
       .nm-track-add{display:none}
-      .nm-dock-root.is-float{padding:0 8px 10px}
-      .nm-dock-root.is-float .nm-dock{width:calc(100vw - 16px)}
-      .nm-dock-root.is-float .nm-dock-inner{flex-wrap:wrap;row-gap:6px;padding:9px 12px 11px}
-      .nm-dock-root.is-float .nm-dock-info{flex:1 1 auto;max-width:none;min-width:0;order:1}
-      .nm-dock-root.is-float .nm-dock-center{display:contents}
-      .nm-dock-root.is-float .nm-dock-controls{order:2;gap:6px}
-      .nm-dock-root.is-float .nm-dock-right{order:3;gap:2px}
-      .nm-dock-root.is-float .nm-progress-wrap{order:4;flex:1 1 100%;padding:0 2px}
-      .nm-dock-root.is-float .nm-dock-error{order:4;flex:1 1 100%;justify-content:flex-start;padding-left:2px}
-      .nm-dock-root.is-bottom .nm-dock{height:70px}
-      .nm-dock-root.is-bottom .nm-dock-inner{padding:0 12px;gap:8px}
+      .nm-dock.is-inline{height:66px}
+      .nm-dock-inner{padding:0 18px;gap:8px}
       .nm-dock-info{flex:0 1 150px}
       .nm-dock-cover{width:36px;height:36px;border-radius:10px}
       .nm-dock-name{font-size:12px}
@@ -4313,12 +4567,14 @@ window.__ModuleLoader__.load({
       .nm-login-banner{flex-wrap:wrap}
       .nm-login-banner .nm-btn{margin-left:54px}
       .nm-modal{width:100%;padding:22px 18px 18px;border-radius:22px}
-      .nm-toast{bottom:150px}
+      .nm-toast{bottom:84px}
       .nm-skel-detail{flex-direction:column}
       .nm-skel-detail .nm-skel{width:150px !important;height:150px !important}
     }
     @media (max-width:520px){
       .nm-wrap{padding:0 14px}
+      .nm-header{padding:0 14px}
+      .nm-dock-inner{padding:0 14px}
       .nm-brand-sub{display:none}
       .nm-hero{padding:22px 18px;border-radius:22px}
       .nm-hero-art{max-width:190px}
@@ -4338,19 +4594,15 @@ window.__ModuleLoader__.load({
       .nm-pill-tab{padding:6px 11px}
     }
     @media (max-width:1080px){
-      .nm-np-body{grid-template-columns:minmax(0,1fr) minmax(300px,.92fr);gap:26px}
       .nm-vinyl-wrap{width:min(36vh,320px)}
-      .nm-np-right{border-radius:18px}
     }
     @media (max-width:900px){
       .nm-np{overflow-y:auto;padding:calc(var(--dsh-frame-top-clearance,48px) + 2px) 20px 18px}
-      .nm-np-body{display:flex;flex-direction:column;flex:none;gap:16px}
-      .nm-np-left{flex:none;justify-content:flex-start;gap:14px}
-      .nm-np-art{flex:none}
+      .nm-np-vinyl-col{justify-content:flex-start;gap:11px;padding-top:6px}
       .nm-vinyl-wrap{width:min(30vh,270px)}
-      .nm-np-cover-art{width:min(28vh,240px)}
-      .nm-np-right{flex:none;height:min(46vh,360px);min-height:280px}
-      .nm-np-lyrics{padding-bottom:22%}
+      .nm-np-lyrics{padding:8px 22px 26%}
+      .nm-np-lyrics-head{padding:2px 22px 6px}
+      .nm-np-lyrics-bar{padding:6px 22px 4px}
     }
     @media (max-width:768px){
       .nm-np{padding:calc(var(--dsh-frame-top-clearance,48px) + 2px) 16px 14px}
@@ -4359,6 +4611,8 @@ window.__ModuleLoader__.load({
       .nm-np-mode-btn{padding:0 10px;font-size:11px}
       .nm-np-title{font-size:23px}
       .nm-np-controls{gap:16px}
+      .nm-np-stage.is-lyrics .nm-lyric-text{font-size:17px}
+      .nm-np-stage.is-lyrics .nm-lyric-line.is-active .nm-lyric-text{font-size:21px}
       .nm-np-play{width:54px;height:54px}
       .nm-np-ctrl{width:38px;height:38px}
       .nm-np-volume{width:84px;flex:0 0 84px}
@@ -4501,72 +4755,12 @@ window.__ModuleLoader__.load({
           label: () => translate('app.title'),
         }, PanelIcon)), 'netease-music: sidebar entry')
 
-        /* 播放条优先独占 shell.bottom；注册抛错或组件 800ms 内未挂载则回退 shell.overlay */
-        effect(() => {
-          let disposed = false
-          let bottomDispose = null
-          let overlayDispose = null
-          let watchdog = null
-          resetDockMounted()
-
-          const cleanupBottom = () => {
-            if (typeof bottomDispose === 'function') {
-              try {
-                bottomDispose()
-              } catch (err) {
-                /* ignore */
-              }
-            }
-            bottomDispose = null
-          }
-
-          /* shell.overlay：常驻注册一个 null 占位，只有回退时才渲染 PlayerDock */
-          try {
-            overlayDispose = ctx.slots.inject('shell.overlay', () => ctx.slots.register({
-              name: 'shell.overlay',
-              id: 'netease-music-player',
-            }, OverlayDock))
-          } catch (err) {
-            overlayDispose = null
-          }
-
-          const fallbackToOverlay = () => {
-            if (disposed) return
-            cleanupBottom()
-            setDockPlacement('float')
-          }
-
-          try {
-            bottomDispose = ctx.slots.inject('shell.bottom', () => ctx.slots.register({
-              name: 'shell.bottom',
-              id: 'netease-music-player',
-            }, BottomDock))
-            setDockPlacement('bottom')
-            watchdog = setTimeout(() => {
-              watchdog = null
-              if (disposed || isDockMounted()) return
-              fallbackToOverlay()
-            }, 800)
-          } catch (err) {
-            fallbackToOverlay()
-          }
-
-          return () => {
-            disposed = true
-            if (watchdog) clearTimeout(watchdog)
-            watchdog = null
-            cleanupBottom()
-            if (typeof overlayDispose === 'function') {
-              try {
-                overlayDispose()
-              } catch (err) {
-                /* ignore */
-              }
-            }
-            overlayDispose = null
-            resetDockMounted()
-          }
-        }, 'netease-music: player dock')
+        /* 侧栏迷你播放器：其它面板时显示在设置按钮上方 */
+        effect(() => ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
+          name: 'sidebar.footer.action',
+          id: 'netease-mini',
+          order: 10,
+        }, MiniPlayer)), 'netease-music: sidebar mini player')
       },
     }
 
