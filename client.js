@@ -2073,7 +2073,8 @@ window.__ModuleLoader__.load({
       const [dragX, setDragX] = React.useState(0)
       const [pending, setPending] = React.useState('')
       const [modeMeta, setModeMeta] = React.useState({})
-      const dragRef = React.useRef({ active: false, startX: 0, dx: 0, moved: false })
+      const pendingRef = React.useRef('')
+      const dragRef = React.useRef({ active: false, startX: 0, dx: 0, moved: false, captured: false })
       const suppressRef = React.useRef(false)
       const suppressTimer = React.useRef(null)
       const animatingRef = React.useRef(false)
@@ -2184,7 +2185,8 @@ window.__ModuleLoader__.load({
       }
 
       const playMode = (mode) => {
-        if (pending || suppressRef.current) return
+        if (pendingRef.current || suppressRef.current) return
+        pendingRef.current = mode.key
         setPending(mode.key)
         const params = { type: mode.key, limit: 50 }
         if (mode.key !== 'daily') {
@@ -2213,12 +2215,14 @@ window.__ModuleLoader__.load({
             [mode.key]: { title: t(mode.title), subtitle: t(mode.desc), error: message, fallbackUsed: '' },
           }))
           if (props.onToast) props.onToast(message)
+          pendingRef.current = ''
           setPending('')
         }, 8000)
         const finish = () => {
           if (settled) return
           settled = true
           clearTimeout(timeout)
+          pendingRef.current = ''
           setPending('')
         }
         apiGet('/mode?' + qs(params), controller ? controller.signal : undefined).then((data) => {
@@ -2266,13 +2270,8 @@ window.__ModuleLoader__.load({
 
       const onTrackPointerDown = (event) => {
         if (event.button !== undefined && event.button !== 0) return
-        dragRef.current = { active: true, startX: event.clientX, dx: 0, moved: false }
+        dragRef.current = { active: true, startX: event.clientX, dx: 0, moved: false, captured: false }
         setDragging(true)
-        try {
-          event.currentTarget.setPointerCapture(event.pointerId)
-        } catch (err) {
-          /* ignore */
-        }
       }
 
       const onTrackPointerMove = (event) => {
@@ -2280,8 +2279,25 @@ window.__ModuleLoader__.load({
         if (!state.active) return
         const dx = event.clientX - state.startX
         state.dx = dx
-        if (Math.abs(dx) > 8) state.moved = true
+        if (Math.abs(dx) > 8 && !state.moved) {
+          state.moved = true
+          /* 只有确认是拖拽后才捕获指针，避免把纯点击的 click 吞掉 */
+          try {
+            event.currentTarget.setPointerCapture(event.pointerId)
+            state.captured = true
+          } catch (err) {
+            /* ignore */
+          }
+        }
         setDragX(dx)
+      }
+
+      const suppressNextClick = () => {
+        suppressRef.current = true
+        if (suppressTimer.current) clearTimeout(suppressTimer.current)
+        suppressTimer.current = setTimeout(() => {
+          suppressRef.current = false
+        }, 60)
       }
 
       const finishDrag = (event) => {
@@ -2291,11 +2307,23 @@ window.__ModuleLoader__.load({
         const dx = event && event.clientX !== undefined ? event.clientX - state.startX : state.dx
         if (state.moved && Math.abs(dx) > 40) {
           go(dx < 0 ? 1 : -1)
-          suppressRef.current = true
-          if (suppressTimer.current) clearTimeout(suppressTimer.current)
-          suppressTimer.current = setTimeout(() => {
-            suppressRef.current = false
-          }, 60)
+          suppressNextClick()
+        } else if (!state.moved && event && event.clientX !== undefined && typeof document !== 'undefined') {
+          /* 兜底：某些浏览器/捕获场景下 click 可能丢失，pointerup 时主动找卡片播放 */
+          try {
+            const hit = document.elementFromPoint(event.clientX, event.clientY)
+            const card = hit && hit.closest ? hit.closest('[data-nm="carousel-card"]') : null
+            if (card && !card.classList.contains('is-clone')) {
+              const modeKey = card.getAttribute('data-mode')
+              const targetMode = HERO_MODES.filter((item) => item.key === modeKey)[0]
+              if (targetMode) {
+                suppressNextClick()
+                playMode(targetMode)
+              }
+            }
+          } catch (err) {
+            /* ignore */
+          }
         }
         setDragging(false)
         setDragX(0)
@@ -2340,9 +2368,20 @@ window.__ModuleLoader__.load({
         h('h2', { className: 'nm-carousel-title' }, meta.title || t(mode.title)),
         h('p', { className: 'nm-carousel-desc' }, meta.error || meta.subtitle || t(mode.desc)),
         meta.fallbackUsed ? h('p', { className: 'nm-carousel-fallback' }, t('hero.fallback', { reason: meta.fallbackUsed })) : null,
-        h('span', { className: 'nm-carousel-cta' },
-          pending === mode.key ? h(Spinner) : h(Icon, { name: 'play', size: 13 }),
-          pending === mode.key ? t('state.loading') : (meta.error ? t('hero.retry') : t('hero.play')))))
+        h('button', {
+          type: 'button',
+          className: 'nm-carousel-cta',
+          'data-nm': 'carousel-play',
+          'data-mode': mode.key,
+          tabIndex: clone ? -1 : 0,
+          onClick: (event) => {
+            event.stopPropagation()
+            if (suppressRef.current) return
+            playMode(mode)
+          },
+        },
+        pending === mode.key ? h(Spinner) : h(Icon, { name: 'play', size: 13 }),
+        pending === mode.key ? t('state.loading') : (meta.error ? t('hero.retry') : t('hero.play')))))
       }
 
       const slides = [
@@ -4518,7 +4557,7 @@ window.__ModuleLoader__.load({
     .nm-carousel-fallback{margin:6px 0 0;font-size:10.5px;color:var(--nm-t3);line-height:1.4;max-width:38ch;
       display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
     .nm-carousel-fallback.is-error{color:var(--nm-error)}
-    .nm-carousel-cta{display:inline-flex;align-items:center;gap:7px;margin-top:18px;height:36px;padding:0 17px;
+    .nm-carousel-cta{display:inline-flex;align-items:center;gap:7px;margin-top:18px;height:36px;padding:0 17px;appearance:none;font:inherit;cursor:pointer;
       border-radius:999px;border:1px solid var(--nm-line);background:color-mix(in srgb,var(--nm-bg) 68%,transparent);
       color:var(--nm-t1);font-size:12.5px;font-weight:650;backdrop-filter:blur(12px);
       box-shadow:0 6px 18px -10px rgba(0,0,0,.5)}
