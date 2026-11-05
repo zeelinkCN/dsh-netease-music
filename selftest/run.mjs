@@ -237,6 +237,33 @@ async function screenshot(name) {
   console.log(`  · screenshot ${file}`)
   return file
 }
+/** 真实鼠标/指针事件（CDP Input.dispatchMouseEvent，走浏览器命中测试，不是合成 click） */
+async function dispatchMouse(type, x, y, extra = {}) {
+  await cdp.send('Input.dispatchMouseEvent', Object.assign({
+    type,
+    x,
+    y,
+    button: 'left',
+    buttons: type === 'mouseReleased' ? 0 : 1,
+    clickCount: 1,
+    pointerType: 'mouse',
+  }, extra))
+}
+async function realClickAt(x, y) {
+  await dispatchMouse('mousePressed', x, y)
+  await sleep(50)
+  await dispatchMouse('mouseReleased', x, y)
+}
+async function realDrag(x, y, dx) {
+  await dispatchMouse('mousePressed', x, y)
+  for (let i = 1; i <= 4; i++) {
+    await sleep(35)
+    await dispatchMouse('mouseMoved', x + (dx * i) / 4, y, { buttons: 1 })
+  }
+  await sleep(40)
+  await dispatchMouse('mouseReleased', x + dx, y)
+}
+
 /** 对某个元素做 N 倍放大截图（用于侧栏图标等小尺寸元素） */
 async function screenshotRegion(selector, name, scale = 4, pad = 20) {
   const box = await evaluate(`(() => {
@@ -873,7 +900,252 @@ try {
   } catch (err) {
     check('mode 接口空数据时 toast/空提示出现', false, String(err))
   }
-  await config({ modeError: null })
+  // ---- v4.2 真实指针事件：CTA / 整卡 / 拖拽 / clone 映射 ----
+  await config({ modeError: null, modeHangMs: 0 })
+  const modeCallCount = async (type) =>
+    (await calls()).filter((c) => c.path === '/netease-panel/api/mode' && (!type || new RegExp('type=' + type + '(?:&|$)').test(c.search || ''))).length
+  const carouselCardRect = (mode) => evaluate(`(() => {
+    const card = [...document.querySelectorAll('[data-nm="carousel-card"]:not([data-clone])')].find((c) => c.getAttribute('data-mode') === ${JSON.stringify(mode)})
+    if (!card) return null
+    const cta = card.querySelector('[data-nm="carousel-play"]')
+    const cr = card.getBoundingClientRect()
+    const br = cta ? cta.getBoundingClientRect() : null
+    return {
+      card: { x: Math.round(cr.left + cr.width * 0.72), y: Math.round(cr.top + cr.height * 0.34), w: Math.round(cr.width), h: Math.round(cr.height) },
+      cta: br ? { x: Math.round(br.left + br.width / 2), y: Math.round(br.top + br.height / 2), w: Math.round(br.width), h: Math.round(br.height) } : null,
+      hasCta: !!cta,
+      ctaTag: cta ? cta.tagName : null,
+    }
+  })()`)
+  await scrollTop()
+  const REAL_MODES = ['heart', 'roam', 'similar_song', 'similar_artist', 'daily']
+  for (let i = 0; i < REAL_MODES.length; i++) {
+    const mode = REAL_MODES[i]
+    await carouselDots(i)
+    const rect = await carouselCardRect(mode)
+    check(`真实指针点击 ${mode} CTA：卡片内有 carousel-play 按钮`,
+      !!rect && rect.hasCta && rect.cta && rect.cta.x > 0 && rect.cta.x < 1440, JSON.stringify(rect))
+    if (!rect || !rect.cta) continue
+    const before = await modeCallCount(mode)
+    const beforeAllCalls = (await calls()).filter((c) => c.path === '/netease-panel/api/mode').length
+    const beforeTrackId = await audioTrackId()
+    await realClickAt(rect.cta.x, rect.cta.y)
+    let busySeen = false
+    for (let b = 0; b < 8; b++) {
+      await sleep(40)
+      const busy = await evaluate(`(() => {
+        const card = [...document.querySelectorAll('[data-nm="carousel-card"]:not([data-clone])')].find((c) => c.getAttribute('data-mode') === ${JSON.stringify(mode)})
+        return card ? card.getAttribute('aria-busy') : null
+      })()`)
+      if (busy === 'true') { busySeen = true; break }
+    }
+    try {
+      await waitFor(`(() => {
+        const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio')
+        return !!a && a.paused === false
+      })()`, 'audio after real CTA ' + mode, 8000)
+      check(`真实指针点击 ${mode} CTA 后 audio 在播放`, true)
+    } catch (err) {
+      check(`真实指针点击 ${mode} CTA 后 audio 在播放`, false, String(err))
+    }
+    await sleep(250)
+    const after = await modeCallCount(mode)
+    const newModeCalls = (await calls()).filter((c) => c.path === '/netease-panel/api/mode').slice(beforeAllCalls).map((c) => c.search)
+    const beaconCalls = (await calls())
+      .filter((c) => c.path === '/netease-panel/api/playlist' && /diag/.test(c.search || ''))
+      .slice(-4).map((c) => decodeURIComponent(c.search || '').slice(0, 120))
+    check(`真实指针点击 ${mode} CTA 只发 1 次 /mode 请求（去重成功）`, after === before + 1,
+      JSON.stringify({ mode, before, after, busySeen, newModeCalls, beaconCalls }))
+    let trackChanged = false
+    try {
+      await waitFor(`(() => {
+        const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio')
+        if (!a) return false
+        const m = /[?&]id=(\\d+)/.exec(a.getAttribute('src') || '')
+        return !!m && m[1] !== ${JSON.stringify(beforeTrackId)}
+      })()`, 'real CTA track change ' + mode, 9000)
+      trackChanged = true
+    } catch (err) { /* 下面断言输出 */ }
+    check(`真实指针点击 ${mode} CTA 后切换曲目（audio id 变化）`, trackChanged,
+      JSON.stringify({ beforeTrackId, afterTrackId: await audioTrackId(), newModeCalls }))
+  }
+  // 整卡（非按钮区域）真实指针点击
+  await carouselDots(1) // roam
+  const roamRect = await carouselCardRect('roam')
+  const roamBefore = await modeCallCount('roam')
+  const roamTrackBefore = await audioTrackId()
+  check('整卡非按钮区域真实点击（roam）', !!roamRect)
+  if (roamRect) {
+    await realClickAt(roamRect.card.x, roamRect.card.y)
+    try {
+      await waitFor(`(() => {
+        const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio')
+        return !!a && a.paused === false
+      })()`, 'audio after card click', 8000)
+      await sleep(200)
+      let roamChanged = false
+      try {
+        await waitFor(`(() => {
+          const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio')
+          if (!a) return false
+          const m = /[?&]id=(\\d+)/.exec(a.getAttribute('src') || '')
+          return !!m && m[1] !== ${JSON.stringify(roamTrackBefore)}
+        })()`, 'real card track change', 9000)
+        roamChanged = true
+      } catch (err) { /* 断言输出 */ }
+      check('整卡真实点击后播放成功（1 次 /mode 请求 + 切歌）',
+        (await modeCallCount('roam')) === roamBefore + 1 && roamChanged,
+        JSON.stringify({ before: roamBefore, after: await modeCallCount('roam'), roamTrackBefore, roamTrackAfter: await audioTrackId() }))
+    } catch (err) {
+      check('整卡真实点击后播放成功（1 次 /mode 请求）', false, String(err))
+    }
+  }
+  // 拖拽 200px：切换卡片且不误触发播放
+  await carouselDots(0)
+  const dragGeo = await carouselGeometry()
+  const dragModeBefore = (await calls()).filter((c) => c.path === '/netease-panel/api/mode').length
+  const dragPoint = await evaluate(`(() => {
+    const card = document.querySelector('[data-nm="carousel-card"]:not([data-clone])')
+    if (!card) return null
+    const r = card.getBoundingClientRect()
+    return { x: Math.round(r.left + r.width * 0.78), y: Math.round(r.top + r.height * 0.5) }
+  })()`)
+  if (dragPoint) {
+    await realDrag(dragPoint.x, dragPoint.y, -200)
+    await sleep(800)
+    const dragGeoAfter = await carouselGeometry()
+    check('真实拖拽 200px 后轮播切换到下一张',
+      !!dragGeo && !!dragGeoAfter && dragGeoAfter.activeDot === ((dragGeo.activeDot + 1) % 5),
+      JSON.stringify({ before: dragGeo && dragGeo.activeDot, after: dragGeoAfter && dragGeoAfter.activeDot }))
+    check('拖拽切换卡片不会误触发播放（无新增 /mode 请求）',
+      (await calls()).filter((c) => c.path === '/netease-panel/api/mode').length === dragModeBefore,
+      JSON.stringify({ before: dragModeBefore, after: (await calls()).filter((c) => c.path === '/netease-panel/api/mode').length }))
+  }
+  // clone 映射：绕回动画中真实点击 clone，不能播错 mode
+  await carouselDots(4)
+  await clickSel('[data-nm="carousel-next"]')
+  await sleep(260)
+  const cloneInfo = await evaluate(`(() => {
+    const clones = [...document.querySelectorAll('[data-nm="carousel-card"][data-clone="true"]')]
+    if (!clones.length) return { found: false }
+    const vis = clones.map((clone) => {
+      const r = clone.getBoundingClientRect()
+      return {
+        clone,
+        r,
+        visible: r.left < innerWidth && r.right > 0 && r.top < innerHeight && r.bottom > 0 &&
+          Math.min(r.right, innerWidth) - Math.max(r.left, 0) > 40,
+      }
+    })
+    const picked = vis.find((v) => v.visible) || vis[0]
+    const clone = picked.clone
+    const r = picked.r
+    return {
+      found: true,
+      mode: clone.getAttribute('data-mode'),
+      ariaHidden: clone.getAttribute('aria-hidden'),
+      tabIndex: clone.tabIndex,
+      pointerEvents: getComputedStyle(clone).pointerEvents,
+      rect: { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), visible: picked.visible },
+    }
+  })()`)
+  check('clone 卡 aria-hidden=true 且不可聚焦',
+    !!cloneInfo && cloneInfo.found && cloneInfo.ariaHidden === 'true' && cloneInfo.tabIndex === -1,
+    JSON.stringify(cloneInfo))
+  if (cloneInfo && cloneInfo.found && cloneInfo.rect.visible) {
+    const callsBeforeClone = (await calls()).filter((c) => c.path === '/netease-panel/api/mode').length
+    await realClickAt(cloneInfo.rect.x, cloneInfo.rect.y)
+    await sleep(800)
+    const newCalls = (await calls()).filter((c) => c.path === '/netease-panel/api/mode').slice(callsBeforeClone)
+    const playedWrong = newCalls.some((c) => {
+      const m = /type=([a-z_]+)/.exec(c.search || '')
+      return m && m[1] !== cloneInfo.mode
+    })
+    check('真实点击 clone 不会播放错误的 mode（允许忽略或映射到对应真实卡）',
+      !playedWrong, JSON.stringify({ cloneMode: cloneInfo.mode, newCalls: newCalls.map((c) => c.search) }))
+  } else {
+    check('真实点击 clone 不会播放错误的 mode（允许忽略或映射到对应真实卡）', true,
+      '动画中途 clone 不在视口内，跳过点击（clone aria-hidden/不可聚焦已断言）')
+  }
+  await sleep(800)
+
+  // /mode 挂起超时：8s AbortController → toast + 卡片可重试，pending 清空
+  await config({ modeError: null, modeHangMs: 9500 })
+  const modeCallsBeforeHang = (await calls()).filter((c) => c.path === '/netease-panel/api/mode').length
+  const heartClicked = await evaluate(`(() => {
+    const card = [...document.querySelectorAll('[data-nm="carousel-card"]')].find((c) => c.getAttribute('data-mode') === 'heart')
+    if (!card) return false
+    ;(card.querySelector('[data-nm="carousel-play"], button') || card).click()
+    return true
+  })()`)
+  check('点击会挂起的 heart 卡', heartClicked)
+  let pendingState = null
+  for (let i = 0; i < 12; i++) {
+    await sleep(100)
+    pendingState = await evaluate(`(() => {
+      const card = [...document.querySelectorAll('[data-nm="carousel-card"]')].find((c) => c.getAttribute('data-mode') === 'heart')
+      if (!card) return null
+      return {
+        busy: card.getAttribute('aria-busy'),
+        text: (card.textContent || '').trim().slice(0, 60),
+        spinner: !!card.querySelector('.nm-spinner, [class*="spinner"]'),
+      }
+    })()`)
+    if (pendingState && pendingState.busy === 'true') break
+  }
+  check('挂起中卡片 aria-busy="true" 且显示 loading',
+    !!pendingState && pendingState.busy === 'true' && pendingState.spinner, JSON.stringify(pendingState))
+  await evaluate(`(() => {
+    const card = [...document.querySelectorAll('[data-nm="carousel-card"]')].find((c) => c.getAttribute('data-mode') === 'heart')
+    if (card) (card.querySelector('[data-nm="carousel-play"], button') || card).click()
+  })()`)
+  await sleep(350)
+  const modeCallsDuring = (await calls()).filter((c) => c.path === '/netease-panel/api/mode').length
+  check('pending 期间重复点击被忽略（未重复发 /mode 请求）',
+    modeCallsDuring === modeCallsBeforeHang + 1, JSON.stringify({ before: modeCallsBeforeHang, during: modeCallsDuring }))
+  try {
+    await waitFor(`(() => {
+      const t = document.querySelector('.nm-toast, [data-nm="toast"], [role="status"]')
+      return !!t && /超时|重试|失败/.test(t.textContent || '')
+    })()`, 'mode timeout toast', 11000)
+    const toastText = await textOf('.nm-toast, [data-nm="toast"], [role="status"]')
+    check('挂起 8s 后出现「超时/重试」toast', true, (toastText || '').slice(0, 50))
+  } catch (err) {
+    check('挂起 8s 后出现「超时/重试」toast', false, String(err))
+  }
+  try {
+    await waitFor(`(() => {
+      const card = [...document.querySelectorAll('[data-nm="carousel-card"]')].find((c) => c.getAttribute('data-mode') === 'heart')
+      if (!card) return false
+      return card.getAttribute('aria-busy') !== 'true' && /重试|失败|超时/.test(card.textContent || '')
+    })()`, 'mode card retry state', 7000)
+    check('超时后卡片恢复可点击并显示「重试/错误」文案', true)
+  } catch (err) {
+    const st = await evaluate(`(() => {
+      const card = [...document.querySelectorAll('[data-nm="carousel-card"]')].find((c) => c.getAttribute('data-mode') === 'heart')
+      return card ? { busy: card.getAttribute('aria-busy'), text: (card.textContent || '').trim().slice(0, 80) } : null
+    })()`)
+    check('超时后卡片恢复可点击并显示「重试/错误」文案', false, JSON.stringify(st))
+  }
+  await config({ modeHangMs: 0 })
+  const dailyCallsBefore = (await calls()).filter((c) => c.path === '/netease-panel/api/mode' && /type=daily/.test(c.search || '')).length
+  await evaluate(`(() => {
+    const card = [...document.querySelectorAll('[data-nm="carousel-card"]')].find((c) => c.getAttribute('data-mode') === 'daily')
+    if (!card) return
+    ;(card.querySelector('[data-nm="carousel-play"], button') || card).click()
+  })()`)
+  try {
+    await waitFor(`(() => {
+      const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio')
+      return !!a && a.paused === false
+    })()`, 'daily plays after timeout', 10000)
+    const dailyCallsAfter = (await calls()).filter((c) => c.path === '/netease-panel/api/mode' && /type=daily/.test(c.search || '')).length
+    check('超时恢复后点其它卡仍能播放（pending 已清空）', dailyCallsAfter > dailyCallsBefore,
+      JSON.stringify({ before: dailyCallsBefore, after: dailyCallsAfter }))
+  } catch (err) {
+    check('超时恢复后点其它卡仍能播放（pending 已清空）', false, String(err))
+  }
+  await config({ modeError: null, modeHangMs: 0 })
   check('轮播异常后页面仍无未处理异常（错误收集在最后统一断言）', true)
 
   console.log('\n[3] 播放：播放全部 → 播放条出现 → 播放中 → 进度前进 → 下一首 → 暂停')
@@ -2268,6 +2540,253 @@ try {
     await clickSel('[data-nm="player-toggle"]')
     await sleep(300)
   }
+
+  console.log('\n[9e] v4.1 收藏红心：track-like / np-like / dock-like')
+  // 回到列表（若在播放页则退出）
+  if (await evaluate(`!!document.querySelector('[data-nm="nowplaying"]')`)) {
+    await evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`)
+    await sleep(500)
+  }
+  await evaluate(`window.__setActivePanel('netease-music')`)
+  await sleep(200)
+  if (!(await playerVisible())) {
+    if (await clickSel('[data-nm="play-all"]')) {
+      try { await waitFor(`!!document.querySelector('[data-nm="dock"]')`, 'dock for likes', 8000) } catch { /* ignore */ }
+    }
+  }
+  await scrollTop()
+  const likePostCount = async () =>
+    (await calls()).filter((c) => c.method === 'POST' && c.path === '/netease-panel/api/like').length
+  const likeStatusCalls = async () =>
+    (await calls()).filter((c) => c.path === '/netease-panel/api/like/status')
+  // 找一首未收藏（奇数 id 默认未收藏）的曲目行
+  const rowInfo = await evaluate(`(() => {
+    const rows = [...document.querySelectorAll('[data-nm="track"]')]
+    const row = rows.find((r) => Number(r.getAttribute('data-id')) % 2 === 1)
+    if (!row) return null
+    row.scrollIntoView({ block: 'center' })
+    const r = row.getBoundingClientRect()
+    return { id: row.getAttribute('data-id'), x: Math.round(r.left + r.width * 0.5), y: Math.round(r.top + r.height / 2), top: Math.round(r.top), h: Math.round(r.height) }
+  })()`)
+  check('找到未收藏曲目行', !!rowInfo, JSON.stringify(rowInfo))
+  let likeVisible = false
+  if (rowInfo) {
+    await dispatchMouse('mouseMoved', rowInfo.x, rowInfo.y)
+    await sleep(350)
+    likeVisible = await evaluate(`(() => {
+      const btn = document.querySelector('[data-nm="track-like"]')
+      if (!btn) return false
+      const r = btn.getBoundingClientRect()
+      const cx = r.left + r.width / 2
+      const cy = r.top + r.height / 2
+      const hit = document.elementFromPoint(cx, cy)
+      return r.width > 0 && r.height > 0 && !!hit && (hit === btn || btn.contains(hit))
+    })()`)
+  }
+  check('hover 曲目行后出现 [data-nm="track-like"]（可命中）', likeVisible)
+  if (likeVisible) await S('26a-like-hover.png')
+  let likeRowRect = await evaluate(`(() => {
+    const btn = document.querySelector('[data-nm="track-like"]')
+    if (!btn) return null
+    const r = btn.getBoundingClientRect()
+    return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), liked: btn.getAttribute('data-liked') }
+  })()`)
+  check('track-like 初始为未收藏 data-liked="false"', !!likeRowRect && likeRowRect.liked === 'false', JSON.stringify(likeRowRect))
+  const likePost0 = await likePostCount()
+  if (likeRowRect) {
+    await realClickAt(likeRowRect.x, likeRowRect.y)
+    try {
+      await waitFor(`(() => { const b = document.querySelector('[data-nm="track-like"]'); return !!b && b.getAttribute('data-liked') === 'true' })()`, 'row like true', 6000)
+      check('点 track-like 后 data-liked=true', true)
+    } catch (err) {
+      check('点 track-like 后 data-liked=true', false, String(err))
+    }
+    check('点未收藏 → POST /like 恰好 1 次', (await likePostCount()) === likePost0 + 1,
+      JSON.stringify({ before: likePost0, after: await likePostCount() }))
+    await sleep(200)
+    await realClickAt(likeRowRect.x, likeRowRect.y)
+    try {
+      await waitFor(`(() => { const b = document.querySelector('[data-nm="track-like"]'); return !!b && b.getAttribute('data-liked') === 'false' })()`, 'row like false', 6000)
+      check('再点 track-like 后 data-liked=false', true)
+    } catch (err) {
+      check('再点 track-like 后 data-liked=false', false, String(err))
+    }
+    check('再点已收藏 → 再 POST /like 1 次（共 2 次）', (await likePostCount()) === likePost0 + 2,
+      JSON.stringify({ before: likePost0, after: await likePostCount() }))
+    // 再点亮一次用于截图
+    await realClickAt(likeRowRect.x, likeRowRect.y)
+    await sleep(500)
+    await S('26-like-toggled.png')
+  }
+  // 失败回滚：POST 返回 500 → 乐观更新回滚 + toast
+  await config({ likeError: true })
+  const rollbackRow = await evaluate(`(() => {
+    const row = [...document.querySelectorAll('[data-nm="track"]')].find((r) => Number(r.getAttribute('data-id')) % 2 === 1)
+    if (!row) return null
+    row.scrollIntoView({ block: 'center' })
+    const r = row.getBoundingClientRect()
+    return { x: Math.round(r.left + r.width * 0.5), y: Math.round(r.top + r.height / 2) }
+  })()`)
+  if (rollbackRow) {
+    await dispatchMouse('mouseMoved', rollbackRow.x, rollbackRow.y)
+    await sleep(350)
+    const btnBefore = await evaluate(`(() => { const b = document.querySelector('[data-nm="track-like"]'); return b ? b.getAttribute('data-liked') : null })()`)
+    const postBefore = await likePostCount()
+    const btnRect = await evaluate(`(() => { const b = document.querySelector('[data-nm="track-like"]'); if (!b) return null; const r = b.getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) } })()`)
+    if (btnRect) {
+      await realClickAt(btnRect.x, btnRect.y)
+      try {
+        await waitFor(`(() => {
+          const t = document.querySelector('.nm-toast, [data-nm="toast"], [role="status"]')
+          return !!t && /失败|重试|收藏/.test(t.textContent || '')
+        })()`, 'like fail toast', 7000)
+        check('收藏失败出现 toast', true)
+      } catch (err) {
+        check('收藏失败出现 toast', false, String(err))
+      }
+      await sleep(600)
+      const btnAfter = await evaluate(`(() => { const b = document.querySelector('[data-nm="track-like"]'); return b ? b.getAttribute('data-liked') : null })()`)
+      check('收藏失败后 data-liked 回滚到原状态', btnBefore != null && btnAfter === btnBefore,
+        JSON.stringify({ btnBefore, btnAfter }))
+      check('收藏失败仍尝试了 1 次 POST /like', (await likePostCount()) === postBefore + 1,
+        JSON.stringify({ before: postBefore, after: await likePostCount() }))
+    }
+  }
+  await config({ likeError: false })
+
+  // 未登录：/status 返回 authed=false + 重新加载，确保客户端 authInfo.authed=false → 只 toast 不发 POST
+  await config({ authed: false, likeAuthed: false })
+  await reload()
+  try {
+    await waitFor(`!!document.querySelector('[data-nm="root"]')`, 'reload unauthed', 15000)
+    await waitFor(`document.querySelectorAll('[data-nm="track"]').length >= 5`, 'rows after unauthed reload', 15000)
+  } catch (err) { /* 下面断言暴露 */ }
+  await scrollTop()
+  const anonRow = await evaluate(`(() => {
+    const row = [...document.querySelectorAll('[data-nm="track"]')][0]
+    if (!row) return null
+    row.scrollIntoView({ block: 'center' })
+    const r = row.getBoundingClientRect()
+    return { x: Math.round(r.left + r.width * 0.5), y: Math.round(r.top + r.height / 2) }
+  })()`)
+  if (anonRow) {
+    await dispatchMouse('mouseMoved', anonRow.x, anonRow.y)
+    await sleep(400)
+    const likeBtnForAnon = await evaluate(`(() => {
+      const b = document.querySelector('[data-nm="track-like"]')
+      if (!b) return null
+      const r = b.getBoundingClientRect()
+      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }
+    })()`)
+    const likePostBeforeAnon = await likePostCount()
+    if (likeBtnForAnon) {
+      await realClickAt(likeBtnForAnon.x, likeBtnForAnon.y)
+      try {
+        await waitFor(`(() => {
+          const t = document.querySelector('.nm-toast, [data-nm="toast"], [role="status"]')
+          return !!t && /登录|收藏|失败|重试/.test(t.textContent || '')
+        })()`, 'like unauth toast', 7000)
+        check('未登录点红心出现 toast', true)
+      } catch (err) {
+        check('未登录点红心出现 toast', false, String(err))
+      }
+      await sleep(400)
+      check('未登录点红心不发 POST /like', (await likePostCount()) === likePostBeforeAnon,
+        JSON.stringify({ before: likePostBeforeAnon, after: await likePostCount() }))
+    } else {
+      check('未登录点红心出现 toast', false, '未找到 track-like')
+    }
+  }
+  await config({ authed: true, likeAuthed: true })
+  await reload()
+  try {
+    await waitFor(`document.querySelectorAll('[data-nm="track"]').length >= 5`, 'rows restored after unauthed test', 15000)
+    await scrollTop()
+  } catch { /* ignore */ }
+  await config({ likeAuthed: true })
+
+  // 进入播放页：np-like 与当前曲目一致，切歌后同步，dock-like 同步
+  const rowClick = await evaluate(`(() => {
+    const row = [...document.querySelectorAll('[data-nm="track"]')].find((r) => Number(r.getAttribute('data-id')) % 2 === 1)
+    if (!row) return false
+    row.scrollIntoView({ block: 'center' })
+    const r = row.getBoundingClientRect()
+    return { x: Math.round(r.left + 40), y: Math.round(r.top + r.height / 2) }
+  })()`)
+  if (rowClick) {
+    await realClickAt(rowClick.x, rowClick.y)
+    try {
+      await waitFor(`!!document.querySelector('[data-nm="nowplaying"]')`, 'nowplaying for likes', 8000)
+      check('点曲目行进入播放页（收藏测试）', true)
+    } catch (err) {
+      check('点曲目行进入播放页（收藏测试）', false, String(err))
+    }
+    await sleep(600)
+    const fetchLikeStatus = (id) => evaluate(`fetch('/netease-panel/api/like/status?ids=' + encodeURIComponent(${JSON.stringify('__LIKE_ID__')})).then(function (r) { return r.json() }).then(function (j) { return j }).catch(function () { return null })`.replace('__LIKE_ID__', String(id)))
+    const curId = await audioTrackId()
+    const statusNow = await fetchLikeStatus(curId)
+    const expectedLiked = statusNow && statusNow.data && statusNow.data.liked ? statusNow.data.liked[String(curId)] : null
+    const npLike = await evaluate(`(() => { const b = document.querySelector('[data-nm="np-like"]'); return b ? { liked: b.getAttribute('data-liked'), exists: true } : { exists: false } })()`)
+    check('播放页有 [data-nm="np-like"]', !!npLike && npLike.exists, JSON.stringify(npLike))
+    check('np-like 初始状态与服务器一致',
+      !!npLike && npLike.exists && expectedLiked != null && String(expectedLiked) === String(npLike.liked),
+      JSON.stringify({ curId, expectedLiked, npLike }))
+    const statusBeforeSwitch = (await likeStatusCalls()).length
+    const npPost0 = await likePostCount()
+    const npRect = await evaluate(`(() => { const b = document.querySelector('[data-nm="np-like"]'); if (!b) return null; const r = b.getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) } })()`)
+    if (npRect) {
+      await realClickAt(npRect.x, npRect.y)
+      try {
+        await waitFor(`(() => { const b = document.querySelector('[data-nm="np-like"]'); return !!b && b.getAttribute('data-liked') !== ${JSON.stringify(String(expectedLiked))} })()`, 'np like toggled', 6000)
+        check('点 np-like 后 data-liked 翻转', true)
+      } catch (err) {
+        check('点 np-like 后 data-liked 翻转', false, String(err))
+      }
+      check('np-like 点击后 POST /like 1 次', (await likePostCount()) === npPost0 + 1,
+        JSON.stringify({ before: npPost0, after: await likePostCount() }))
+    }
+    await S('27-np-like.png')
+    const dockLike = await evaluate(`(() => { const b = document.querySelector('[data-nm="dock-like"]'); return b ? { liked: b.getAttribute('data-liked') } : { exists: false } })()`)
+    const npLikedNow = await evaluate(`(() => { const b = document.querySelector('[data-nm="np-like"]'); return b ? b.getAttribute('data-liked') : null })()`)
+    check('dock 有 [data-nm="dock-like"]', !!dockLike && dockLike.exists !== false, JSON.stringify(dockLike))
+    check('dock-like 与 np-like 状态同步', !!dockLike && dockLike.liked === npLikedNow,
+      JSON.stringify({ dockLike, npLikedNow }))
+    await S('28-dock-like.png')
+    // 切歌：np-like 随歌曲变化，/like/status 每批 ≤1 次
+    const idBeforeSwitch = await audioTrackId()
+    await clickSel('[data-nm="player-next"]')
+    try {
+      await waitFor(`(() => {
+        const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio')
+        if (!a) return false
+        const m = /[?&]id=(\\d+)/.exec(a.getAttribute('src') || '')
+        return !!m && m[1] !== ${JSON.stringify(String(idBeforeSwitch))}
+      })()`, 'track switch for like', 8000)
+      check('收藏测试切歌成功', true)
+    } catch (err) {
+      check('收藏测试切歌成功', false, String(err))
+    }
+    await sleep(1400)
+    const newId = await audioTrackId()
+    const statusNew = await fetchLikeStatus(newId)
+    const expectedNew = statusNew && statusNew.data && statusNew.data.liked ? statusNew.data.liked[String(newId)] : null
+    const npLikeNew = await evaluate(`(() => { const b = document.querySelector('[data-nm="np-like"]'); return b ? b.getAttribute('data-liked') : null })()`)
+    check('切歌后 np-like 随当前歌曲状态变化',
+      expectedNew != null && String(expectedNew) === String(npLikeNew),
+      JSON.stringify({ newId, expectedNew, npLikeNew }))
+    const statusAfterSwitch = (await likeStatusCalls()).length
+    check('/like/status 每批 ≤1 次（切歌新增 ≤1）', statusAfterSwitch - statusBeforeSwitch <= 1,
+      JSON.stringify({ before: statusBeforeSwitch, after: statusAfterSwitch }))
+    const batchCalls = (await likeStatusCalls()).slice(-5)
+    check('/like/status 使用批量 ids（一次含多首）', batchCalls.some((c) => /ids=[^&]*,/.test(c.search || '')),
+      JSON.stringify(batchCalls.map((c) => c.search)))
+  }
+  // 回到列表避免影响后续
+  if (await evaluate(`!!document.querySelector('[data-nm="nowplaying"]')`)) {
+    await evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`)
+    await sleep(400)
+  }
+  await config({ likeAuthed: true, likeError: null })
 
   console.log('\n[8] 运行期错误')
   const realErrors = errors.filter((e) => !/favicon|ERR_ABORTED/.test(e))

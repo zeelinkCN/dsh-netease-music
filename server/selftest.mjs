@@ -13,6 +13,7 @@
 
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -220,6 +221,97 @@ async function call(cmd, params, timeoutMs) {
     throw error
   }
   return message.data
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+/** 按自定义 env 另起一个独立 bridge 进程（用于未登录行为验证），返回轻量调用器。 */
+function startBridge(envOverrides = {}) {
+  const proc = spawn(python, ['-u', bridgePath], {
+    cwd: pluginDir,
+    env: { ...process.env, PYTHONUNBUFFERED: '1', ...envOverrides },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  })
+  proc.stdout.setEncoding('utf8')
+  proc.stderr.setEncoding('utf8')
+  let buffer = ''
+  let seqExtra = 0
+  let exited = false
+  const waiters = new Map()
+  let resolveReady
+  let rejectReady
+  const ready = new Promise((resolve, reject) => {
+    resolveReady = resolve
+    rejectReady = reject
+  })
+  const readyTimer = setTimeout(() => rejectReady(new Error('第二个 bridge 启动超时（ready）')), 90_000)
+  proc.stdout.on('data', (chunk) => {
+    buffer += chunk
+    let index
+    while ((index = buffer.indexOf('\n')) >= 0) {
+      const line = buffer.slice(0, index)
+      buffer = buffer.slice(index + 1)
+      if (!line.trim()) continue
+      let message
+      try {
+        message = JSON.parse(line)
+      } catch {
+        continue
+      }
+      if (message.event === 'ready') {
+        clearTimeout(readyTimer)
+        resolveReady(message.data)
+        continue
+      }
+      const waiter = waiters.get(String(message.id))
+      if (waiter) {
+        waiters.delete(String(message.id))
+        waiter(message)
+      }
+    }
+  })
+  proc.stderr.on('data', () => {})
+  proc.on('exit', () => {
+    exited = true
+    clearTimeout(readyTimer)
+    rejectReady(new Error('第二个 bridge 提前退出'))
+    for (const waiter of waiters.values()) waiter({ ok: false, code: 'BRIDGE', error: 'bridge 进程已退出' })
+    waiters.clear()
+  })
+  return {
+    proc,
+    ready,
+    call(cmd, params = {}, timeoutMs = 120_000) {
+      return new Promise((resolve, reject) => {
+        if (exited) return reject(new Error('bridge 进程已退出'))
+        const id = String(++seqExtra)
+        const timer = setTimeout(() => {
+          waiters.delete(id)
+          reject(new Error(`第二个 bridge ${cmd} 超时（${timeoutMs}ms）`))
+        }, timeoutMs)
+        waiters.set(id, (message) => {
+          clearTimeout(timer)
+          resolve(message)
+        })
+        proc.stdin.write(`${JSON.stringify({ id, cmd, params })}\n`)
+      })
+    },
+    async close() {
+      try {
+        proc.stdin.end()
+      } catch {
+        /* ignore */
+      }
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, 8_000)
+        proc.once('exit', () => {
+          clearTimeout(timer)
+          resolve()
+        })
+      })
+      if (proc.exitCode === null) proc.kill('SIGKILL')
+    },
+  }
 }
 
 async function main() {
@@ -543,6 +635,160 @@ async function main() {
     info('mode 非法类型', `${badMode.code}: ${badMode.error}`)
   } catch (error) {
     check('mode 非法类型返回 ok:false（INTERNAL）', () => { throw error })
+  }
+
+  // 10.9) v4.1 歌曲收藏 like_status / like_set（真实登录态；like_set 必须可回滚）
+  let likedPlaylistTracks = []
+  let likedPlaylistName = null
+  try {
+    const myLists = await call('my_playlists', {}, 120000)
+    const likedList = (myLists.playlists || []).find((item) => (item.name || '').includes('喜欢的音乐'))
+    if (likedList) {
+      likedPlaylistName = likedList.name
+      const detail = await call('playlist', { id: likedList.id }, 180000)
+      likedPlaylistTracks = (detail.songs || []).map((song) => song.id)
+    }
+    info('like 测试素材', likedList ? `「${likedPlaylistName}」可读 ${likedPlaylistTracks.length} 首` : '未找到「我喜欢的音乐」歌单')
+  } catch (error) {
+    info('like 测试素材', `读取「我喜欢的音乐」失败：${error.message}`)
+  }
+
+  let likeUnlikedId = null
+  {
+    const likedSet = new Set(likedPlaylistTracks)
+    const candidates = []
+    for (const song of home?.daily || []) candidates.push(song.id)
+    if (candidates.length === 0) {
+      try {
+        const dailyData = await call('daily')
+        for (const song of dailyData.songs || []) candidates.push(song.id)
+      } catch {
+        /* ignore */
+      }
+    }
+    likeUnlikedId = candidates.find((id) => !likedSet.has(id)) ?? null
+  }
+
+  if (likedPlaylistTracks.length >= 2 && likeUnlikedId) {
+    const sampleLiked = likedPlaylistTracks.slice(0, 2)
+    const sampleIds = [...sampleLiked, likeUnlikedId]
+    try {
+      const status = await call('like_status', { ids: sampleIds })
+      check('like_status 已收藏 2 首 → true、未收藏 1 首 → false', () => {
+        hasKeys(status, ['liked', 'authed'], 'like_status')
+        assert(status.authed === true, `authed 应为 true，实际 ${status.authed}`)
+        assert(status.liked && typeof status.liked === 'object', 'liked 应为对象')
+        for (const id of sampleLiked) {
+          assert(status.liked[String(id)] === true, `已收藏歌曲 ${id} 应返回 true，实际 ${status.liked[String(id)]}`)
+        }
+        assert(
+          status.liked[String(likeUnlikedId)] === false,
+          `未收藏歌曲 ${likeUnlikedId} 应返回 false，实际 ${status.liked[String(likeUnlikedId)]}`,
+        )
+      })
+      info('like_status', `已收藏 ${sampleLiked.map((id) => String(id)).join(',')} → true；未收藏 ${likeUnlikedId} → false`)
+    } catch (error) {
+      check('like_status 已收藏 2 首 → true、未收藏 1 首 → false', () => { throw error })
+    }
+
+    // like_set 可回滚测试：先收藏、立刻取消，最终必须复原（不能污染用户收藏）
+    let restored = false
+    let likeSetError = null
+    try {
+      const before = await call('like_status', { ids: [likeUnlikedId] })
+      assert(before.liked[String(likeUnlikedId)] === false, `前置条件失败：歌曲 ${likeUnlikedId} 本应未收藏`)
+      const turnedOn = await call('like_set', { id: likeUnlikedId, like: true })
+      assert(turnedOn.ok === true && turnedOn.liked === true, `like_set(true) 返回异常：${JSON.stringify(turnedOn)}`)
+      await sleep(250)
+      const afterLike = await call('like_status', { ids: [likeUnlikedId] })
+      assert(afterLike.liked[String(likeUnlikedId)] === true, '收藏后 like_status 应为 true')
+      const turnedOff = await call('like_set', { id: likeUnlikedId, like: false })
+      assert(turnedOff.ok === true && turnedOff.liked === false, `like_set(false) 返回异常：${JSON.stringify(turnedOff)}`)
+      await sleep(250)
+      const afterUnlike = await call('like_status', { ids: [likeUnlikedId] })
+      assert(afterUnlike.liked[String(likeUnlikedId)] === false, '取消收藏后 like_status 应为 false')
+      restored = true
+      info('like_set 回滚测试', `id=${likeUnlikedId} 未收藏→收藏→未收藏，状态翻转正常且已复原`)
+    } catch (error) {
+      likeSetError = error
+    } finally {
+      if (!restored) {
+        try {
+          await call('like_set', { id: likeUnlikedId, like: false })
+          await sleep(250)
+          const rollbackStatus = await call('like_status', { ids: [likeUnlikedId] })
+          restored = rollbackStatus.liked[String(likeUnlikedId)] === false
+          info('like_set 兜底回滚', restored ? '已强制取消收藏' : '回滚后仍为收藏状态，请人工检查！')
+        } catch (rollbackError) {
+          info('like_set 兜底回滚失败', rollbackError.message)
+        }
+      }
+    }
+    check('like_set 可回滚（收藏后取消，最终状态与初始一致）', () => {
+      if (likeSetError) throw likeSetError
+      assert(restored, '目标歌曲收藏状态未复原！')
+    })
+  } else {
+    check('like_status 已收藏 2 首 → true、未收藏 1 首 → false', () => {
+      throw new Error(
+        `测试素材不足：需要「我喜欢的音乐」≥2 首且存在未收藏歌曲（likedTracks=${likedPlaylistTracks.length}, unliked=${likeUnlikedId}）`,
+      )
+    })
+  }
+
+  try {
+    const badLikeStatus = await callRaw('like_status', {})
+    check('like_status 缺 ids 返回 ok:false（INTERNAL）', () => {
+      assert(badLikeStatus.ok === false, 'ok 应为 false')
+      assert(badLikeStatus.code === 'INTERNAL', `code 应为 INTERNAL，实际 ${badLikeStatus.code}`)
+      assert(typeof badLikeStatus.error === 'string' && badLikeStatus.error.length > 0, 'error 应为非空字符串')
+    })
+    info('like_status 缺参', `${badLikeStatus.code}: ${badLikeStatus.error}`)
+  } catch (error) {
+    check('like_status 缺 ids 返回 ok:false（INTERNAL）', () => { throw error })
+  }
+
+  // 10.10) 未登录（匿名）行为：另起一个 bridge，cookie 指向临时空文件
+  {
+    const unauthCookie = path.join(os.tmpdir(), `nm-selftest-unauth-${process.pid}.json`)
+    try {
+      fs.rmSync(unauthCookie, { force: true })
+    } catch {
+      /* ignore */
+    }
+    const unauthBridge = startBridge({ NETEASE_COOKIE_FILE: unauthCookie })
+    try {
+      const readyData = await unauthBridge.ready
+      check('未登录 bridge 启动（authed=false）', () => {
+        assert(readyData && typeof readyData.authed === 'boolean', 'ready.data 缺失')
+        assert(readyData.authed === false, `未登录 bridge 的 authed 应为 false，实际 ${readyData.authed}`)
+      })
+
+      const unauthStatus = await unauthBridge.call('like_status', { ids: [441491828, 33544485] })
+      check('like_status 未登录：全 false + authed:false（不报错）', () => {
+        assert(unauthStatus.ok === true, `ok 应为 true，实际 ${unauthStatus.ok}`)
+        hasKeys(unauthStatus.data, ['liked', 'authed'], 'like_status(unauth)')
+        assert(unauthStatus.data.authed === false, 'authed 应为 false')
+        for (const id of [441491828, 33544485]) {
+          assert(unauthStatus.data.liked[String(id)] === false, `未登录时 ${id} 应为 false`)
+        }
+      })
+
+      const unauthSet = await unauthBridge.call('like_set', { id: 441491828, like: true })
+      check('like_set 未登录返回 ok:false + UNAUTHENTICATED', () => {
+        assert(unauthSet.ok === false, 'ok 应为 false')
+        assert(unauthSet.code === 'UNAUTHENTICATED', `code 应为 UNAUTHENTICATED，实际 ${unauthSet.code}`)
+        assert(typeof unauthSet.error === 'string' && unauthSet.error.includes('登录'), 'error 应提示先登录')
+      })
+      info('未登录行为', `like_status authed=false；like_set ${unauthSet.code}: ${unauthSet.error}`)
+    } finally {
+      await unauthBridge.close()
+      try {
+        fs.rmSync(unauthCookie, { force: true })
+      } catch {
+        /* ignore */
+      }
+    }
   }
 
   // 11) song_url

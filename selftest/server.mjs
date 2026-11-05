@@ -40,6 +40,9 @@ const cfg = {
   slowSeekMs: 0,      // >0：audio Range 请求 start>0 时延迟（模拟慢速 seek）
   slowAudioMs: 0,     // >0：所有 /audio 响应延迟（模拟 metadata 迟到）
   modeError: null,    // null | 'empty' | 'error'：/mode 接口异常模拟
+  modeHangMs: 0,      // >0：/mode 响应挂起（模拟超时，UI 8s AbortController 兜底）
+  likeAuthed: true,   // false：/like/status 返回 authed:false（未登录）
+  likeError: null,    // true：like 接口返回 500
   engine: 'installed',   // installed | missing | installing | failed
   installError: false,
   install: { state: 'idle', phase: 'idle', lines: [], error: null, installed: true, startedAt: 0 },
@@ -336,6 +339,19 @@ function songUrl(id, requested) {
 }
 
 /* ------------------------------------------------------------------ *
+ * 收藏（红心）状态：默认偶数 id 已收藏，POST /like 翻转并记录次数
+ * ------------------------------------------------------------------ */
+const likedState = new Map()
+for (const t of tracks) if (Number(t.id) % 2 === 0) likedState.set(String(t.id), true)
+const isLiked = (id) => !!likedState.get(String(id))
+function likeStatus(idsParam) {
+  const ids = String(idsParam || '').split(',').map((x) => x.trim()).filter(Boolean)
+  const liked = {}
+  for (const id of ids) liked[id] = isLiked(id)
+  return { liked, authed: !!cfg.likeAuthed }
+}
+
+/* ------------------------------------------------------------------ *
  * HTTP 工具
  * ------------------------------------------------------------------ */
 function json(res, code, body, headers = {}) {
@@ -542,6 +558,7 @@ async function handleApi(req, res, path, searchParams) {
 
     case '/mode': {
       const type = searchParams.get('type') || 'heart'
+      if (cfg.modeHangMs > 0) await sleep(cfg.modeHangMs)
       if (cfg.modeError === 'error') return fail(res, 'NETWORK', '推荐模式暂不可用，请稍后重试', 500)
       const limit = Math.max(12, Math.min(20, Number(searchParams.get('limit')) || 16))
       if (cfg.modeError === 'empty') {
@@ -639,6 +656,23 @@ async function handleApi(req, res, path, searchParams) {
       return ok(res, installSummary())
     }
 
+    case '/like/status': {
+      if (cfg.likeError) return fail(res, 'NETWORK', '收藏状态加载失败（mock）', 500)
+      return ok(res, likeStatus(searchParams.get('ids')))
+    }
+
+    case '/like': {
+      if (req.method !== 'POST') return fail(res, 'INTERNAL', 'method not allowed', 405)
+      if (!cfg.likeAuthed) return fail(res, 'UNAUTHENTICATED', '请先扫码登录后再收藏', 401)
+      if (cfg.likeError) return fail(res, 'NETWORK', '收藏失败，请稍后重试（mock）', 500)
+      const body = await readBody(req)
+      const id = body && body.id != null ? String(body.id) : null
+      if (!id) return fail(res, 'NOT_FOUND', '缺少歌曲 id', 400)
+      const next = typeof body.liked === 'boolean' ? body.liked : !isLiked(id)
+      likedState.set(id, next)
+      return ok(res, { ok: true, id, liked: next })
+    }
+
     case '/login/start':
       if (req.method !== 'POST') return fail(res, 'INTERNAL', 'method not allowed', 405)
       loginCheckCount = 0
@@ -727,6 +761,11 @@ const server = createServer(async (req, res) => {
     cfg.slowSeekMs = 0
     cfg.slowAudioMs = 0
     cfg.modeError = null
+    cfg.modeHangMs = 0
+    cfg.likeAuthed = true
+    cfg.likeError = null
+    likedState.clear()
+    for (const t of tracks) if (Number(t.id) % 2 === 0) likedState.set(String(t.id), true)
     cfg.engine = 'installed'
     cfg.installError = false
     cfg.install = { state: 'idle', phase: 'idle', lines: [], error: null, installed: true, startedAt: 0 }

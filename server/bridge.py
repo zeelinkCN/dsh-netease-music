@@ -161,6 +161,22 @@ def _text(value):
     return s or None
 
 
+def _as_bool(value, default=None):
+    """把 true/false/1/0/"true"/"false" 等宽容地转成 bool。"""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in ("true", "1", "yes", "on", "like", "liked"):
+        return True
+    if text in ("false", "0", "no", "off", "unlike", "unliked"):
+        return False
+    return default
+
+
 def _https(url):
     """图片 URL 统一升级成 https；空值返回 None。"""
     if not url or not isinstance(url, str):
@@ -1164,6 +1180,84 @@ class Engine:
             "tlyric": _text(tlyric.get("lyric")),
         }
 
+    # ---------------- v4.1 歌曲收藏（红心 like_status / like_set） ---------------- #
+    LIKE_CHECK_CHUNK = 500  # 网易云 like/check 单次可带几百个 id，500 一批足够稳
+
+    def _like_check(self, ids):
+        """查询一批歌曲是否已收藏到「我喜欢的音乐」。
+
+        返回 ({"liked": {id: bool}, "authed": bool}, 去重后的 id 列表)。
+        未登录（含匿名）不报错，全部 false + authed:false。
+        """
+        unique = []
+        seen = set()
+        for raw in ids or ():
+            track_id = _int(raw)
+            if track_id is None or track_id <= 0 or track_id in seen:
+                continue
+            seen.add(track_id)
+            unique.append(track_id)
+        liked = {track_id: False for track_id in unique}
+        authed = self.is_authed()
+        if not authed or not unique:
+            return {"liked": liked, "authed": authed}, unique
+        for start in range(0, len(unique), self.LIKE_CHECK_CHUNK):
+            chunk = unique[start:start + self.LIKE_CHECK_CHUNK]
+            try:
+                resp = apis.WeapiCryptoRequest(
+                    lambda chunk=chunk: (
+                        "/weapi/song/like/check",
+                        {"trackIds": json.dumps(chunk)},
+                    )
+                )()
+                resp = _api_check(resp, "收藏状态")
+            except BridgeError as exc:
+                if exc.code == "UNAUTHENTICATED":
+                    return {"liked": {i: False for i in unique}, "authed": False}, unique
+                raise
+            for raw in (resp.get("ids") if isinstance(resp, dict) else None) or ():
+                track_id = _int(raw)
+                if track_id is not None and track_id in liked:
+                    liked[track_id] = True
+        return {"liked": liked, "authed": True}, unique
+
+    def cmd_like_status(self, params):
+        ids = params.get("ids")
+        if isinstance(ids, (str, int)):
+            ids = [ids]
+        if not isinstance(ids, list):
+            raise BridgeError("缺少 ids 参数（歌曲 id 数组）", "INTERNAL")
+        if len(ids) > 2000:
+            ids = ids[:2000]
+        data, _ = self._like_check(ids)
+        return data
+
+    def cmd_like_set(self, params):
+        song_id = _require_id(params, "歌曲")
+        song_id_int = _int(song_id)
+        if song_id_int is None:
+            raise BridgeError("歌曲 id 不合法", "INTERNAL")
+        like = _as_bool(_first(params.get("like"), params.get("liked")), None)
+        if like is None:
+            raise BridgeError("like 参数必须是 true 或 false", "INTERNAL")
+        if not self.is_authed():
+            raise BridgeError("请先登录网易云", "UNAUTHENTICATED")
+        resp = apis.track.SetLikeTrack(song_id_int, like=like)
+        if not isinstance(resp, dict):
+            raise BridgeError("收藏接口返回了无法解析的数据", "NETWORK")
+        code = _int(resp.get("code"))
+        if code == 200:
+            return {"ok": True, "liked": like}
+        if code in (301, 302):
+            raise BridgeError("请先登录网易云", "UNAUTHENTICATED", code)
+        message = _text(resp.get("message")) or _text(resp.get("msg"))
+        raise BridgeError(
+            "收藏操作失败%s"
+            % ("：" + message if message else "（错误码 %s）" % code),
+            "INTERNAL",
+            code,
+        )
+
     # ---------------- v4 听歌模式（mode，契约 §12.4） ---------------- #
     MODE_META = {
         "heart": ("心动模式", "围着你正在听的歌慢慢铺开"),
@@ -1612,6 +1706,8 @@ class Engine:
             "song_url": self.cmd_song_url,
             "lyrics": self.cmd_lyrics,
             "mode": self.cmd_mode,
+            "like_status": self.cmd_like_status,
+            "like_set": self.cmd_like_set,
         }.get(cmd)
         if handler is None:
             raise BridgeError("未知命令：%s" % cmd, "INTERNAL")

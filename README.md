@@ -20,6 +20,7 @@
 - **播放条不挡工作区**
   - 在网易云面板里：页面底部内嵌一条 dock（占自己的布局行，不遮列表、不悬浮）。
   - 回到对话/其它面板：只在**左侧栏 Settings 上方**显示占满侧栏宽度的迷你播放器（封面 + 歌名 + 上一首/播放/下一首 + 喇叭音量滑杆，2px 进度贴底）；侧栏收起成 56px 时只留封面按钮。
+- **收藏红心**：曲目行悬停、播放页歌名旁、底部播放条各有一颗红心，点一下收藏到「我喜欢的音乐」（实心=已收藏），三处状态实时同步；未登录会提示先登录。
 - **扫码登录**：面板内直接出二维码，手机网易云 App 扫一扫；登录态只存在本机，会员账号解锁高音质。
 - **三种听歌入口**：推荐（今日推荐 / 推荐歌单 / 收藏歌手）、歌单（我的/收藏，全量曲目）、搜索（单曲/歌单/歌手/专辑）；另有歌单 / 专辑 / 歌手详情页。
 - **首次安装即自动装好数据引擎**（cloud-music-mcp）：无需命令行，面板内可视化进度与日志。
@@ -122,6 +123,7 @@ Host 侧支持环境变量（一般不需要）：
 ![轮播绕回动画](docs/screenshot-carousel-wrap.png)
 ![黑胶播放页（底部工具栏 + 58% 盘心）](docs/screenshot-nowplaying-with-dock.png)
 ![歌词播放页](docs/screenshot-nowplaying-lyrics.png)
+![收藏红心](docs/screenshot-like.png)
 ![对话框左侧栏迷你播放器](docs/screenshot-mini-sidebar.png)
 ![侧栏收起为 56px 的迷你按钮](docs/screenshot-mini-rail.png)
 ![滚动后贴顶的不透明标题栏](docs/screenshot-header-scrolled.png)

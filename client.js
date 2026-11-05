@@ -170,6 +170,10 @@ window.__ModuleLoader__.load({
       'np.volume': '音量',
       'player.openNowPlaying': '展开播放页',
       'dock.quality': '音质',
+      'action.like': '收藏到我喜欢',
+      'action.unlike': '取消收藏',
+      'like.needLogin': '请先登录网易云',
+      'like.fail': '收藏操作失败，请稍后重试',
       'dock.expand': '展开播放页',
       'dock.collapse': '收起',
       'hero.heart': '心动模式',
@@ -352,6 +356,10 @@ window.__ModuleLoader__.load({
       'np.volume': 'Volume',
       'player.openNowPlaying': 'Open Now Playing',
       'dock.quality': 'Quality',
+      'action.like': 'Add to Liked Songs',
+      'action.unlike': 'Remove from Liked Songs',
+      'like.needLogin': 'Please sign in to NetEase Cloud Music',
+      'like.fail': 'Could not update liked songs, please retry',
       'dock.expand': 'Open Now Playing',
       'dock.collapse': 'Collapse',
       'hero.heart': 'Heartbeat',
@@ -1601,7 +1609,9 @@ window.__ModuleLoader__.load({
     function setAuthInfo(next) {
       const value = { authed: !!(next && next.authed), vip: !!(next && next.vip) }
       if (authInfo.authed === value.authed && authInfo.vip === value.vip) return
+      const authedChanged = authInfo.authed !== value.authed
       authInfo = value
+      if (authedChanged) resetLikeCache()
       Array.from(authListeners).forEach((fn) => {
         try {
           fn()
@@ -1618,6 +1628,152 @@ window.__ModuleLoader__.load({
 
     function useAuthInfo() {
       return useSyncStore(subscribeAuth, () => authInfo)
+    }
+
+    /* ------------------------------------------------------------------ *
+     * 歌曲收藏（红心）：模块级缓存 + 批量状态查询，列表 / 播放页 / dock 共享
+     * ------------------------------------------------------------------ */
+    const likeCache = new Map()
+    const likeCheckedAt = new Map()
+    const likePending = new Set()
+    const likeListeners = new Set()
+    const likeQueue = new Set()
+    let likeFlushTimer = null
+    let likeGlobalToast = null
+
+    function setLikeToast(fn) {
+      likeGlobalToast = fn || null
+    }
+
+    function pushLikeToast(message) {
+      if (typeof likeGlobalToast === 'function' && message) likeGlobalToast(message)
+    }
+
+    function notifyLike(changedId) {
+      Array.from(likeListeners).forEach((fn) => {
+        try {
+          fn(changedId)
+        } catch (err) {
+          /* ignore */
+        }
+      })
+    }
+
+    function resetLikeCache() {
+      likeCache.clear()
+      likeCheckedAt.clear()
+      likePending.clear()
+      likeQueue.clear()
+      if (likeFlushTimer) {
+        clearTimeout(likeFlushTimer)
+        likeFlushTimer = null
+      }
+      notifyLike('')
+    }
+
+    function ensureLikeStatus(ids) {
+      const list = Array.isArray(ids) ? ids : [ids]
+      list.forEach((raw) => {
+        const id = String(raw === undefined || raw === null ? '' : raw)
+        if (!id) return
+        const checkedAt = likeCheckedAt.get(id) || 0
+        if (likeCheckedAt.has(id) && Date.now() - checkedAt < 60000) return
+        likeQueue.add(id)
+      })
+      if (!likeQueue.size || likeFlushTimer) return
+      likeFlushTimer = setTimeout(flushLikeStatus, 40)
+    }
+
+    function flushLikeStatus() {
+      likeFlushTimer = null
+      const ids = Array.from(likeQueue).slice(0, 50)
+      ids.forEach((id) => likeQueue.delete(id))
+      if (!ids.length) return
+      apiGet('/like/status?ids=' + ids.join(',')).then((data) => {
+        const liked = (data && data.liked) || {}
+        ids.forEach((id) => {
+          likeCache.set(id, liked[id] === true)
+          likeCheckedAt.set(id, Date.now())
+        })
+        notifyLike('')
+        if (likeQueue.size && !likeFlushTimer) likeFlushTimer = setTimeout(flushLikeStatus, 40)
+      }).catch(() => {
+        /* 状态查询失败保持未知，不打扰用户 */
+      })
+    }
+
+    function toggleLike(trackId, t) {
+      const id = String(trackId === undefined || trackId === null ? '' : trackId)
+      if (!id) return
+      if (!authInfo.authed) {
+        pushLikeToast(t('like.needLogin'))
+        return
+      }
+      if (likePending.has(id)) return
+      const previous = likeCache.get(id) === true
+      const next = !previous
+      likeCache.set(id, next)
+      likeCheckedAt.set(id, Date.now())
+      likePending.add(id)
+      notifyLike(id)
+      apiPost('/like', { id: Number(id) || id, like: next }).then((data) => {
+        const value = data && typeof data.liked === 'boolean' ? data.liked : next
+        likeCache.set(id, value)
+      }).catch((err) => {
+        likeCache.set(id, previous)
+        pushLikeToast((err && err.message) || t('like.fail'))
+      }).then(() => {
+        likePending.delete(id)
+        notifyLike(id)
+      })
+    }
+
+    function useLike(trackId) {
+      const id = String(trackId === undefined || trackId === null ? '' : trackId)
+      const [, setVersion] = React.useState(0)
+      const auth = useAuthInfo()
+      React.useEffect(() => {
+        const listener = (changedId) => {
+          if (!changedId || changedId === id) setVersion((value) => value + 1)
+        }
+        likeListeners.add(listener)
+        if (id) ensureLikeStatus(id)
+        return () => likeListeners.delete(listener)
+      }, [id, auth.authed])
+      return {
+        liked: likeCache.get(id) === true,
+        known: likeCheckedAt.has(id),
+        pending: likePending.has(id),
+      }
+    }
+
+    function LikeButton(props) {
+      const t = useT()
+      const trackId = props.id
+      const info = useLike(trackId)
+      const size = props.size || 14
+      const liked = info.liked
+      return h('button', {
+        type: 'button',
+        className: cx('nm-like', liked && 'is-liked', info.pending && 'is-pending', props.className),
+        'data-nm': props.nm || 'track-like',
+        'data-id': String(trackId === undefined || trackId === null ? '' : trackId),
+        'data-liked': liked ? 'true' : 'false',
+        'aria-pressed': liked ? 'true' : 'false',
+        title: liked ? t('action.unlike') : t('action.like'),
+        'aria-label': (liked ? t('action.unlike') : t('action.like')) + (props.label ? ' ' + props.label : ''),
+        onClick: (event) => {
+          event.stopPropagation()
+          toggleLike(trackId, t)
+        },
+        onKeyDown: (event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault()
+            event.stopPropagation()
+            toggleLike(trackId, t)
+          }
+        },
+      }, h(Icon, { name: liked ? 'heart' : 'heartO', size }))
     }
 
     /* 点击 dock 封面/歌名：先确保面板在前台，再进入播放页 */
@@ -1666,6 +1822,8 @@ window.__ModuleLoader__.load({
       queue: { stroke: true, paths: ['M4 7h10.5', 'M4 12h10.5', 'M4 17h7', 'M18.2 7.4v9.1', 'M18.2 16.5a2.1 2.1 0 1 0-2.1-2.1'] },
       qr: { stroke: true, paths: ['M4.5 4.5h4.8v4.8H4.5z', 'M14.7 4.5h4.8v4.8h-4.8z', 'M4.5 14.7h4.8v4.8H4.5z', 'M14.7 14.7h4.8v4.8h-4.8z'] },
       note: { paths: ['M9 18a2.6 2.6 0 1 1-2.6-2.6c.47 0 .92.13 1.3.35V6.5l9.9-2.1v9.3a2.6 2.6 0 1 1-2.6-2.6c.47 0 .92.13 1.3.35V7.4l-7.3 1.55z'] },
+      heart: { paths: ['M12 21.2 10.55 19.9C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.4z'] },
+      heartO: { stroke: true, w: 1.75, paths: ['M12 20.15 10.9 19.2C5.9 14.8 2.6 11.85 2.6 8.35c0-2.7 2.1-4.8 4.8-4.8 1.56 0 3.07.73 4.6 2.08 1.53-1.35 3.04-2.08 4.6-2.08 2.7 0 4.8 2.1 4.8 4.8 0 3.5-3.3 6.45-8.3 10.85z'] },
       alert: { stroke: true, paths: ['M12 4.4 21 20H3z', 'M12 10v4.2', 'M12 17.2h.01'] },
       plus: { stroke: true, paths: ['M12 5v14', 'M5 12h14'] },
       disc: { stroke: true, paths: ['M12 3.5a8.5 8.5 0 1 0 0 17 8.5 8.5 0 0 0 0-17z', 'M12 9.2a2.8 2.8 0 1 0 0 5.6 2.8 2.8 0 0 0 0-5.6z'] },
@@ -1889,6 +2047,13 @@ window.__ModuleLoader__.load({
             props.onPlay()
           },
         }, h(Icon, { name: props.active && props.playing ? 'pause' : 'play', size: 14 })),
+        h(LikeButton, {
+          id: track.id,
+          nm: 'track-like',
+          size: 15,
+          className: 'nm-track-like',
+          label: track.name,
+        }),
         h('button', {
           type: 'button',
           className: 'nm-icon-btn nm-track-add',
@@ -3233,6 +3398,13 @@ window.__ModuleLoader__.load({
           h('span', { className: 'nm-dock-name', title: track.name }, track.name),
           h('span', { className: cx('nm-dock-artist', snapshot.error && 'is-error') },
             snapshot.error ? t('player.error') : trackArtists(track) || t('player.nowPlaying')))),
+        h(LikeButton, {
+          id: track.id,
+          nm: 'dock-like',
+          size: 14,
+          className: 'nm-dock-like',
+          label: track.name,
+        }),
         collapsed
           ? null
           : h('div', { className: 'nm-dock-center' },
@@ -3475,7 +3647,15 @@ window.__ModuleLoader__.load({
         h('div', { className: 'nm-np-eyebrow' },
           h('span', { className: 'nm-np-eyebrow-dot' }),
           track.vip ? t('vip') : t('np.title')),
-        h('h1', { className: 'nm-np-title', title: track.name }, track.name || t('state.unknown')),
+        h('div', { className: 'nm-np-title-row' },
+          h('h1', { className: 'nm-np-title', title: track.name }, track.name || t('state.unknown')),
+          h(LikeButton, {
+            id: track.id,
+            nm: 'np-like',
+            size: 18,
+            className: 'nm-np-like',
+            label: track.name,
+          })),
         h('div', { className: 'nm-np-sub' }, trackArtists(track) || ''),
         track.album ? h('div', { className: 'nm-np-album' }, t('np.album') + ' · ' + track.album) : null)
 
@@ -3703,6 +3883,10 @@ window.__ModuleLoader__.load({
       const [refresh, setRefresh] = React.useState(0)
       const [authVersion, setAuthVersion] = React.useState(0)
       const [toast, setToast] = React.useState(null)
+      React.useEffect(() => {
+        setLikeToast(setToast)
+        return () => setLikeToast(null)
+      }, [])
       const npIsOpen = useNpOpen()
       const [install, setInstall] = React.useState({ state: 'idle', phase: '', lines: [], error: '' })
       const [installStarting, setInstallStarting] = React.useState(false)
@@ -4675,6 +4859,16 @@ window.__ModuleLoader__.load({
     .nm-track-artist{font-size:11.5px;color:var(--nm-t3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
     .nm-track-album{font-size:11.5px;color:var(--nm-t3);min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
     .nm-track-time{font-size:11.5px;color:var(--nm-t3);text-align:right;font-variant-numeric:tabular-nums}
+    .nm-like{display:grid;place-items:center;border:0;background:none;padding:0;cursor:pointer;color:var(--nm-t3);
+      border-radius:50%;flex:none;transition:color .16s ease,transform .16s ease,opacity .16s ease}
+    .nm-like:hover{color:#ec4141}
+    .nm-like:active{transform:scale(.9)}
+    .nm-like.is-liked{color:#ec4141}
+    .nm-like.is-pending{opacity:.55;cursor:default}
+    .nm-track-like{width:26px;height:26px;margin-right:2px}
+    .nm-np-title-row{display:flex;align-items:center;justify-content:center;gap:10px;flex-wrap:wrap;min-width:0}
+    .nm-np-like{width:30px;height:30px;color:var(--nm-t2)}
+    .nm-dock-like{width:26px;height:26px;margin-left:-4px}
     .nm-track-actions{display:flex;align-items:center;justify-content:flex-end;gap:0;opacity:0;transition:opacity 140ms ease}
     .nm-track:hover .nm-track-actions,.nm-track:focus-within .nm-track-actions,.nm-track.is-active .nm-track-actions{opacity:1}
     .nm-track-actions .nm-icon-btn{width:28px;height:28px}

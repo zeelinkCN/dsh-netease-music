@@ -39,13 +39,14 @@ cd netease-panel-selftest
 - `/song/url?level=`：`auto→exhigh/320000`、`standard/128000`、`exhigh/320000`、`lossless/1512987`、`hires/1512987`；`trial` 可用 `/__config {trial:true}` 打开。
 - `/img?u=` 返回本地 SVG 兜底（client 封面失败 fallback 用）。
 - `/login/start` 返回固定 QR SVG data URL；`/login/check` 第 1、2 次 `waiting`、第 3 次 `scanned`、第 4 次 `ok`（契约第 9 节）。
-- v4 `/mode?type=heart|roam|similar_song|similar_artist|daily&songId=&artistId=&limit=`：返回 `{type,title,subtitle,resolvedSeed,fallbackUsed,songs}`，5 种 type 各 12–20 首；`fallbackUsed` 在无 seed 的 roam/similar_song 时为「今日推荐第一首」；`/__config {modeError:'empty'|'error'}` 模拟空数据/接口错误（UI 应 toast + 可重试）。
+- v4 `/mode?type=heart|roam|similar_song|similar_artist|daily&songId=&artistId=&limit=`：返回 `{type,title,subtitle,resolvedSeed,fallbackUsed,songs}`，5 种 type 各 12–20 首；`fallbackUsed` 在无 seed 的 roam/similar_song 时为「今日推荐第一首」；`/__config {modeError:'empty'|'error', modeHangMs}` 模拟空数据/接口错误/挂起超时（UI 应 toast + 可重试）。
+- v4.1 收藏红心：`GET /like/status?ids=` 返回 `{liked:{id:bool}, authed}`（默认偶数 id 已收藏）；`POST /like {id, like}` 翻转并返回 `{ok,id,liked}`；`/__config {likeAuthed:false}` 模拟未登录（/status`authed:false` 需配合配置+reload），`{likeError:true}` 模拟收藏失败回滚。
 - v3 引擎安装：`POST /setup/install` 启动状态机（clone→venv→pip→verify→done，约 3.2s），`GET /setup/install/log` 返回 `{state,phase,lines,error,installed}`；`/status` 带 `engine:'installed|missing|installing|failed'` 与 `install` 摘要。`/__config {installError:true}` 可模拟失败。
 - 控制面：`POST /__config`（`authed` / `bridge:'ready'|'starting'|'error'` / `engine` / `installError` / `errorMode:null|'home'|'all'` / `slowMs` / `trial`），`GET /__calls`，`POST /__reset`。
   - `bridge:'error'` → `/status` 报 `bridge:'error'`，数据接口 503 `code:'BRIDGE'`（验证「引擎缺失」不白屏）。
   - `errorMode:'home'` → 数据接口 500 `code:'NETWORK'`（验证错误态 + 重试原地恢复）。
 
-## 断言覆盖（258 项，v1–v4）
+## 断言覆盖（313 项，v1–v4.1）
 
 1. 模块：client.js 加载、`__ModuleLoader__.load`、3 个 slot 注册及 spec（`main.key`、`sidebar.panellist.id/order=30`、`shell.overlay.id`）、`<audio data-nm-audio>` 创建、无曲目时播放条不渲染。
    侧栏图标：`<img>`、`src` 为 `data:image/png;base64,`（官方红标）、`naturalWidth>0`、渲染尺寸 = 传入 size(20)，深/浅色各一张 4x 放大截图。
@@ -70,7 +71,9 @@ cd netease-panel-selftest
 13. v4 Hero 轮播 + `/mode`：`hero-carousel`、7 张 `carousel-card`（5 真实 + 2 clone，clone `data-clone=true`）、5 种 mode；next/prev 换卡；7s 自动切换；hover 后 7s 暂停；transition 360ms；最后一张 → next 平滑回绕（中途 transform 位移、结束 activeDot=0），第一张 → prev 回绕到最后；6s 自动在最后一张平滑绕回第一张；点 similar_song 卡（无在播）请求带 `songId=今日推荐第一首`；点 daily 卡切换播放；`modeError:'error'/'empty'` 时 toast 出现且不崩溃。
 14. v4 播放页布局纠正：进入 Now Playing 后底部 dock 必须存在（`dock=1`），**全页 `player-progress` 恰好 1 条且播放页内部 0 条**，传输键组只有底部一组（NP 内 0 组）；黑胶盘心 label 直径/盘面直径 ≈0.58（±0.03）且 label/img 正圆；返回列表 dock 恢复。
 15. seek 回归：慢速 seek（`data-seeking=true` 保持、松手不回落、完成后 ≈70%）、真实时序拖拽 70%、点按 50%、pointerup 派发到 body 仍提交 30%、metadata 迟到 pendingSeek 生效 ≈60%、键盘 ArrowRight/Home/End、命中高度 22px。
-16. 运行期：无 `console.error`、无未捕获页面异常；重新播放后播放条恢复。
+16. v4.2 真实指针（CDP Input.dispatchMouseEvent，非合成 click）：五张卡 CTA 真实鼠标点击各发 1 次 `/mode` 且切歌、整卡非按钮区真实点击播放、拖拽 200px 只切卡不误播、clone 卡 aria-hidden/pointer-events:none 真实点击不播错 mode、`/mode` 挂起 9s→8s 超时 toast「请求超时，请重试」→卡片可重试→后续点卡仍播放。
+17. v4.1 收藏红心：hover 曲目行出现可命中的 `track-like`；点击未收藏→`data-liked=true` 且 POST 恰好 1 次；再点→false；失败（likeError）→toast + data-liked 回滚且仍只 POST 1 次；未登录（/status authed=false + reload）点击→toast 且**不发 POST**；播放页 `np-like` 与当前曲目状态一致、点击翻转、切歌后随歌曲变化；`dock-like` 与 np-like 同步；`/like/status` 批量 ids、每批 ≤1 次。
+18. 运行期：无 `console.error`、无未捕获页面异常；重新播放后播放条恢复。
 
 ## 截图
 
@@ -109,6 +112,10 @@ cd netease-panel-selftest
 | `shots/24-carousel-1.png` / `24-carousel-2.png` / `24-carousel-3.png` | 轮播第 1/2/3 张卡 |
 | `shots/24-carousel-wrap.png` | 轮播最后一张 → 第一张回绕动画中的一帧 |
 | `shots/25-nowplaying-with-dock.png` | v4 播放页底部 dock 存在、无第二组进度/传输键 |
+| `shots/26a-like-hover.png` | v4.1 列表行 hover 显示描边红心 |
+| `shots/26-like-toggled.png` | v4.1 收藏后实心红心 |
+| `shots/27-np-like.png` | v4.1 播放页 np-like 状态 |
+| `shots/28-dock-like.png` | v4.1 dock-like 与播放页同步 |
 
 ## 主题 token 说明（与真实 Harness 的差异）
 
