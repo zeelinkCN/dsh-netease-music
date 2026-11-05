@@ -3015,21 +3015,22 @@ window.__ModuleLoader__.load({
       }
 
       return h('div', { className: 'nm-mini', 'data-nm': 'mini-player' },
-        h('button', {
-          type: 'button',
-          className: 'nm-mini-cover-btn',
-          title: t('np.open'),
-          'aria-label': t('np.open'),
-          onClick: open,
-        }, cover),
-        h('button', {
-          type: 'button',
-          className: 'nm-mini-text',
-          title: track.name,
-          onClick: open,
-        },
-        h('span', { className: 'nm-mini-name' }, track.name),
-        h('span', { className: 'nm-mini-artist' }, trackArtists(track))),
+        h('div', { className: 'nm-mini-top' },
+          h('button', {
+            type: 'button',
+            className: 'nm-mini-cover-btn',
+            title: t('np.open'),
+            'aria-label': t('np.open'),
+            onClick: open,
+          }, cover),
+          h('button', {
+            type: 'button',
+            className: 'nm-mini-text',
+            title: track.name,
+            onClick: open,
+          },
+          h('span', { className: 'nm-mini-name' }, track.name),
+          h('span', { className: 'nm-mini-artist' }, trackArtists(track)))),
         h('div', { className: 'nm-mini-controls' },
           h('button', {
             type: 'button',
@@ -3038,7 +3039,7 @@ window.__ModuleLoader__.load({
             title: t('action.prev'),
             'aria-label': t('action.prev'),
             onClick: () => player.prev(),
-          }, h(Icon, { name: 'prev', size: 12 })),
+          }, h(Icon, { name: 'prev', size: 14 })),
           h('button', {
             type: 'button',
             className: 'nm-mini-toggle',
@@ -3046,7 +3047,7 @@ window.__ModuleLoader__.load({
             title: toggleLabel,
             'aria-label': toggleLabel,
             onClick: () => player.toggle(),
-          }, h(Icon, { name: playing ? 'pause' : 'play', size: 13 })),
+          }, h(Icon, { name: playing ? 'pause' : 'play', size: 15 })),
           h('button', {
             type: 'button',
             className: 'nm-mini-ctrl',
@@ -3054,7 +3055,7 @@ window.__ModuleLoader__.load({
             title: t('action.next'),
             'aria-label': t('action.next'),
             onClick: () => player.next(false),
-          }, h(Icon, { name: 'next', size: 12 })),
+          }, h(Icon, { name: 'next', size: 14 })),
           h('div', { className: 'nm-mini-volume-wrap' },
             h('button', {
               type: 'button',
@@ -3063,7 +3064,7 @@ window.__ModuleLoader__.load({
               title: snapshot.muted ? t('action.unmute') : t('action.mute'),
               'aria-label': snapshot.muted ? t('action.unmute') : t('action.mute'),
               onClick: () => player.toggleMute(),
-            }, h(Icon, { name: snapshot.muted ? 'mute' : 'volume', size: 12 })),
+            }, h(Icon, { name: snapshot.muted ? 'mute' : 'volume', size: 14 })),
             h('div', { className: 'nm-mini-volume-pop' },
               h(Slider, {
                 value: snapshot.muted ? 0 : snapshot.volume,
@@ -3073,6 +3074,7 @@ window.__ModuleLoader__.load({
                 onCommit: (ratio) => player.setVolume(ratio),
               })))),
         progress)
+
     }
 
     /* ------------------------------------------------------------------ *
@@ -4377,34 +4379,39 @@ window.__ModuleLoader__.load({
 
     /* ---------- 侧栏迷你播放器（与侧栏其他行同宽、扁平卡片） ---------- */
     .nm-mini{
-      position:relative;display:flex;align-items:center;gap:7px;
-      width:100%;max-width:none;box-sizing:border-box;height:60px;
-      padding:8px 7px 10px;border-radius:9px;border:1px solid var(--nm-line2);
+      position:relative;display:flex;flex-direction:column;gap:2px;
+      width:100%;max-width:none;box-sizing:border-box;height:auto;min-height:78px;
+      padding:5px 10px 6px;border-radius:10px;border:1px solid var(--nm-line2);
       background:color-mix(in srgb,var(--nm-t1) 4%,transparent);
       overflow:visible;color:var(--nm-t1);text-align:left;
     }
     [data-ds-dark-theme] .nm-mini{background:color-mix(in srgb,var(--nm-t1) 6%,transparent)}
     .nm-mini:hover{background:color-mix(in srgb,var(--nm-t1) 8%,transparent)}
+    .nm-mini-top{display:flex;align-items:center;gap:8px;min-width:0;flex:none;height:38px}
     .nm-mini-cover-btn{display:block;flex:none;background:none;border:0;padding:0;cursor:pointer;border-radius:9px;overflow:hidden;width:38px;height:38px}
     .nm-mini-cover{display:block;width:38px;height:38px;border-radius:9px;overflow:hidden;flex:none;box-shadow:0 3px 8px -4px rgba(0,0,0,.5)}
     .nm-mini-text{
-      flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:0;
+      flex:1 1 auto;min-width:0;display:flex;flex-direction:column;justify-content:center;gap:1px;
       background:none;border:0;padding:0;cursor:pointer;text-align:left;color:inherit;overflow:hidden;
     }
-    .nm-mini-name{font-size:11px;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.4}
-    .nm-mini-artist{font-size:9.5px;color:var(--nm-t3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.4}
-    .nm-mini-controls{display:flex;align-items:center;gap:1px;flex:none;min-width:0}
+    .nm-mini-name{font-size:11.5px;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.35}
+    .nm-mini-artist{font-size:10px;color:var(--nm-t3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.35}
+    .nm-mini-controls{
+      display:flex;align-items:center;justify-content:space-between;
+      flex:none;width:100%;padding:0 2px;margin-top:1px;min-width:0;
+    }
     .nm-mini-ctrl{
-      width:21px;height:21px;border:0;border-radius:6px;background:none;padding:0;
+      width:29px;height:29px;border:0;border-radius:7px;background:none;padding:0;
       display:grid;place-items:center;color:var(--nm-t2);cursor:pointer;flex:none;
     }
     .nm-mini-ctrl:hover{background:var(--nm-fill);color:var(--nm-t1)}
     .nm-mini-toggle{
-      width:26px;height:26px;border-radius:50%;border:0;display:grid;place-items:center;cursor:pointer;flex:none;
+      width:30px;height:30px;border-radius:50%;border:0;display:grid;place-items:center;cursor:pointer;flex:none;
       background:var(--nm-accent);color:var(--nm-on-accent);
+      box-shadow:0 4px 12px -6px color-mix(in srgb,var(--nm-accent) 80%,transparent);
     }
     .nm-mini-toggle:hover{background:color-mix(in srgb,var(--nm-accent) 88%,#000)}
-    .nm-mini-volume-wrap{position:relative;display:flex;align-items:center}
+    .nm-mini-volume-wrap{position:relative;display:flex;align-items:center;flex:none}
     .nm-mini-volume-pop{
       position:absolute;right:0;bottom:calc(100% + 6px);width:132px;padding:8px 10px;
       border-radius:10px;border:1px solid var(--nm-line);background:color-mix(in srgb,var(--nm-l2) 96%,transparent);
@@ -4420,7 +4427,7 @@ window.__ModuleLoader__.load({
     .nm-mini-volume-slider{flex:0 0 auto;width:100%;height:14px}
     .nm-mini-progress{position:absolute;left:1px;right:1px;bottom:0;height:2px;border-radius:0 0 8px 8px;background:color-mix(in srgb,var(--nm-t1) 12%,transparent);overflow:hidden}
     .nm-mini-progress>i{display:block;height:100%;background:var(--nm-accent);border-radius:0 2px 2px 0}
-    .nm-mini.is-rail{width:34px;max-width:34px;height:38px;padding:3px;justify-content:center;border-radius:9px;overflow:hidden}
+    .nm-mini.is-rail{width:34px;max-width:34px;height:38px;padding:3px;justify-content:center;gap:0;border-radius:9px;overflow:hidden}
     .nm-mini.is-rail .nm-mini-cover{width:28px;height:28px;border-radius:7px}
     .nm-mini.is-rail .nm-mini-progress{left:3px;right:3px;bottom:2px;border-radius:2px}
 

@@ -44,7 +44,7 @@ cd netease-panel-selftest
   - `bridge:'error'` → `/status` 报 `bridge:'error'`，数据接口 503 `code:'BRIDGE'`（验证「引擎缺失」不白屏）。
   - `errorMode:'home'` → 数据接口 500 `code:'NETWORK'`（验证错误态 + 重试原地恢复）。
 
-## 断言覆盖（192 项，v1 + v2 + v3）
+## 断言覆盖（195 项，v1 + v2 + v3）
 
 1. 模块：client.js 加载、`__ModuleLoader__.load`、3 个 slot 注册及 spec（`main.key`、`sidebar.panellist.id/order=30`、`shell.overlay.id`）、`<audio data-nm-audio>` 创建、无曲目时播放条不渲染。
    侧栏图标：`<img>`、`src` 为 `data:image/png;base64,`（官方红标）、`naturalWidth>0`、渲染尺寸 = 传入 size(20)，深/浅色各一张 4x 放大截图。
@@ -58,7 +58,7 @@ cd netease-panel-selftest
 9. 引擎缺失：`/status bridge=error` → 页面不白屏 + 显示安装提示；恢复后首页重新渲染。
 10. v2/v3 播放页（契约 §10.5 / §11）：
     - 停靠/槽位：client 不再注册 `shell.bottom` / `shell.overlay`；面板内 `[data-nm="dock"]` 在 `[data-nm="root"]` 内、`position != fixed`、dock.top ≥ scroll.bottom、不遮挡输入框；`sidebar.footer.action` spec（id=netease-mini、order=10）。
-    - mini player：宽侧栏(280px) 时 mini 占满 footer 宽度（差 <2px）、左右对齐（<1px）、高 ≥56、不压 Settings、footer 无横向溢出；`mini-prev/mini-toggle/mini-next/mini-volume` 存在且 prev/next 切歌、volume 静音或弹出滑杆；56px rail 时只显示 ≤34px 封面；面板切到 netease-music 时 mini 隐藏、面板内 dock 出现；点 mini 封面 → selectPanel + 播放页。
+    - mini player：宽侧栏(280px) 时两行卡片，mini 占满 footer 宽度（差 <2px）、左右对齐（<1px）、高 76–90（实测 84）、不压 Settings、footer 无横向溢出；四控件横向铺开（左右留白 ≥8px、首尾跨度/卡宽 ≥0.65 实测 0.784、相邻中心距 ≥24 实测 66/67/67）；`mini-prev/mini-toggle/mini-next/mini-volume` 存在且 prev/next 切歌、volume 静音或弹出滑杆；56px rail 时只显示 34×78 封面（无 prev/next/toggle/volume）；面板切到 netease-music 时 mini 隐藏、面板内 dock 出现；点 mini 封面 → selectPanel + 播放页。
     - 播放页互斥：默认 vinyl 有 np-vinyl/is-spinning、无 np-lyrics；lyrics 有 lyric-line ≥5 且恰好一行 active、无 np-vinyl；切回 vinyl 恢复旋转；np-bg 存在且含封面 URL + blur；点黑胶只切换 data-playing、模式仍 vinyl。
     - 黑胶圆形：np-vinyl、盘心 label、封面 img 宽高相等 + border-radius/clip 50%。
     - 歌词：时间推进后 active 行变化；点击行 → audio.currentTime 跳到 data-time 附近且该行 active。
@@ -95,7 +95,7 @@ cd netease-panel-selftest
 | `shots/17-narrow-600.png` | 600px 窄屏（面板内 dock） |
 | `shots/18-header-scrolled-dark.png` | v3 滚动 800px 后 header 吸顶不透明 |
 | `shots/19-inpanel-dock.png` | v3 面板内 dock（列表不被遮挡、输入框在下方） |
-| `shots/20-mini-sidebar.png` | v3 对话页左侧栏迷你播放器（280px 宽态，含 prev/播放/next/音量） |
+| `shots/20-mini-sidebar.png` | v3 对话页左侧栏迷你播放器（280px 两行卡片：封面/歌名 + prev/播放/next/音量铺开） |
 | `shots/20b-mini-sidebar-light.png` | v3 侧栏迷你播放器（浅色） |
 | `shots/20c-mini-rail.png` | v3 56px rail 形态（仅封面按钮） |
 | `shots/21-nowplaying-vinyl-circular.png` | v3 正圆黑胶（互斥模式） |

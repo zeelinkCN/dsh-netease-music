@@ -1462,10 +1462,41 @@ try {
     check('mini 左右边缘与 footer 对齐（x 差 <1px）',
       Math.abs(mini.miniLeft - mini.footerLeft) < 1 && Math.abs(mini.miniRight - mini.footerRight) < 1, JSON.stringify(mini))
     check('footer 无横向溢出', mini.footerScrollW <= mini.footerClientW + 1, JSON.stringify(mini))
-    check('mini 高度 ≥56px', mini.miniH >= 56, JSON.stringify(mini))
+    check('mini 高度 76–90px（两行布局）', mini.miniH >= 76 && mini.miniH <= 90, JSON.stringify(mini))
     check('mini 不与 Settings 行重叠', mini.miniBottom <= mini.settingsTop + 1, JSON.stringify(mini))
     check('mini 有 prev/toggle/next/volume 控件',
       mini.hasPrev && mini.hasToggle && mini.hasNext && mini.hasVolume, JSON.stringify(mini))
+    const spread = await evaluate(`(() => {
+      const card = document.querySelector('[data-nm="mini-player"]')
+      const names = ['mini-prev', 'mini-toggle', 'mini-next', 'mini-volume']
+      const els = names.map((n) => document.querySelector('[data-nm="' + n + '"]'))
+      if (!card || els.some((e) => !e)) return null
+      const cr = card.getBoundingClientRect()
+      const centers = els.map((el) => {
+        const r = el.getBoundingClientRect()
+        return Math.round((r.left + r.right) / 2)
+      })
+      const sorted = centers.slice().sort((a, b) => a - b)
+      const gaps = sorted.slice(1).map((c, i) => c - sorted[i])
+      return {
+        cardLeft: Math.round(cr.left),
+        cardRight: Math.round(cr.right),
+        cardW: Math.round(cr.width),
+        centers,
+        leftGap: sorted[0] - Math.round(cr.left),
+        rightGap: Math.round(cr.right) - sorted[sorted.length - 1],
+        span: sorted[sorted.length - 1] - sorted[0],
+        spanRatio: Math.round(((sorted[sorted.length - 1] - sorted[0]) / cr.width) * 1000) / 1000,
+        minGap: Math.min.apply(null, gaps),
+        gaps,
+      }
+    })()`)
+    check('mini 控件横向铺开：左右留白均 ≥8px',
+      !!spread && spread.leftGap >= 8 && spread.rightGap >= 8, JSON.stringify(spread))
+    check('mini 控件首尾中心跨度 / 卡片宽 ≥0.65',
+      !!spread && spread.spanRatio >= 0.65, JSON.stringify(spread && { spanRatio: spread.spanRatio, span: spread.span, cardW: spread.cardW }))
+    check('mini 相邻控件中心距 ≥24px',
+      !!spread && spread.minGap >= 24, JSON.stringify(spread && { minGap: spread.minGap, gaps: spread.gaps }))
     // prev / next 切歌
     const idA = await audioTrackId()
     check('点 mini-next', await clickSel('[data-nm="mini-next"]'))
@@ -1535,13 +1566,17 @@ try {
         miniW: Math.round(er.width),
         miniH: Math.round(er.height),
         hasPrev: !!document.querySelector('[data-nm="mini-prev"]'),
+        hasNext: !!document.querySelector('[data-nm="mini-next"]'),
+        hasToggle: !!document.querySelector('[data-nm="mini-toggle"]'),
+        hasVolume: !!document.querySelector('[data-nm="mini-volume"]'),
         footerScrollW: footer.scrollWidth,
         footerClientW: footer.clientWidth,
       }
     })()`)
     check('收起侧栏后为 56px rail', !!miniRail && miniRail.railW === 56, JSON.stringify(miniRail))
-    check('rail 形态仅 28px 封面按钮（宽度 ≤34，无 prev/next）',
-      !!miniRail && miniRail.miniW <= 34 && !miniRail.hasPrev, JSON.stringify(miniRail))
+    check('rail 形态仅封面（宽度 ≤34，无 prev/next/toggle/volume）',
+      !!miniRail && miniRail.miniW <= 34 && !miniRail.hasPrev && !miniRail.hasNext &&
+      !miniRail.hasToggle && !miniRail.hasVolume, JSON.stringify(miniRail))
     check('rail 形态 footer 无横向溢出',
       !!miniRail && miniRail.footerScrollW <= miniRail.footerClientW + 1, JSON.stringify(miniRail))
     await S('20c-mini-rail.png')
