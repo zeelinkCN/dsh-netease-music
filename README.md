@@ -6,7 +6,7 @@
 
 仓库：<https://github.com/zeelinkCN/dsh-netease-music>
 
-![风格](https://img.shields.io/badge/UI-Apple%20Music%20style-111) ![登录](https://img.shields.io/badge/%E7%99%BB%E5%BD%95-%E6%89%AB%E7%A0%81-C20C0C)
+![version](https://img.shields.io/badge/version-1.0.0-ec4141) ![UI](https://img.shields.io/badge/UI-Apple%20Music%20style-111) ![login](https://img.shields.io/badge/%E7%99%BB%E5%BD%95-%E6%89%AB%E7%A0%81-C20C0C) ![license](https://img.shields.io/badge/license-MIT-blue)
 
 ## 功能
 
@@ -35,18 +35,21 @@
 而界面需要结构化数据与可播放音源。登录态与 MCP 共享：扫码登录后会把 cookie 镜像写入
 `engine/cloud-music-mcp/src/cloud_music_mcp/storage/cookies.json`，所以同一个 MCP 也对 Agent 生效。
 
-> 想把 MCP 的工具也暴露给 DeepSeek 的 Agent（例如「帮我放首歌」），在
-> `~/.dsh/profiles/<你的 profile>/cordis.patch.yml` 追加一行（见文末「可选：把 MCP 也给 Agent 用」）。
+> Agent 侧：插件自带 `netease_play` / `netease_player` 工具（见「对话里点歌」），
+> `cordis.patch.yml` 里的 `netease-mcp` 行同时提供 MCP 搜索类工具；两套工具共享登录态。
 
 ## 目录结构
 
 ```
 dsh-netease-music/
-├── index.js              # Host：REST 路由、engine 进程管理、音频/图片代理、缓存
-├── client.js             # 浏览器：main 面板 + sidebar 图标 + shell.overlay 播放条
+├── index.js              # Host：REST 路由 / 引擎进程 / 音频图片代理 / Agent 工具 / 播放器命令队列
+├── client.js             # 浏览器：整页面板 + 侧栏图标 + 迷你播放器 + 播放页 + 播放器 store
 ├── server/bridge.py      # 常驻 Python 数据引擎（NDJSON over stdio）
-├── engine/cloud-music-mcp/   # 上游 MCP 仓库 + .venv
-├── docs/                 # CONTRACT.md 契约 + 验收截图
+├── server/installer.mjs  # 引擎无感安装器（clone + venv + pip，跨 macOS/Linux/Windows）
+├── server/selftest.mjs   # 引擎自测（真实网络，41 项）
+├── engine/cloud-music-mcp/   # 上游 MCP 仓库 + .venv（安装时自动生成，不进仓库）
+├── selftest/             # 浏览器端验收 harness（headless Chrome，342 项断言）
+├── docs/                 # CONTRACT.md 契约 + 截图
 ├── locale/{zh,en}.json   # 插件管理页展示文案
 └── assets/icon*.png      # 官方网易云红标（插件管理页图标）
 ```
@@ -75,10 +78,23 @@ dsh-netease-music/
 
 ## 使用
 
-1. 点左侧栏「网易云音乐」图标 → 右上角「扫码登录」→ 用手机网易云 App 扫码。
-2. 首页「每日推荐」「推荐歌单」「我的歌单」「收藏歌手」任选；或切到「搜索」。
-3. 点任意曲目 / 播放全部 → 底部播放条出现，可拖进度、切歌、调音量、开播放队列。
-4. 切到对话继续工作，播放条仍在底部；点封面/歌名回到音乐面板。
+1. 点左侧栏「网易云音乐」图标 → 右上角「扫码登录」→ 用手机网易云 App 扫码（会员账号解锁高音质）。
+2. 首页「听歌模式轮播」选心动/漫游/相似歌曲/相似艺人/每日推荐（点卡片直接开播），或切到「歌单」「歌手」「搜索」。
+3. 音乐面板底部是本页播放条：可拖进度、上一首/播放/下一首、音量、音质、播放队列、红心收藏；点封面进入全屏播放页（黑胶 / 歌词互斥，可切换）。
+4. 切到对话继续工作：播放器收成**左侧栏 Settings 上方的迷你播放器**，不遮挡输入框；点它回到音乐面板。
+
+## 对话里点歌（Agent 工具）
+
+在任意对话里直接说：
+
+| 你说 | Agent 调用 | 效果 |
+| --- | --- | --- |
+| 「放点周杰伦」 | `netease_play({query:"周杰伦", limit:20})` | 搜索并播放前 20 首 |
+| 「听心动模式 / 私人 FM / 相似歌曲」 | `netease_play({mode:"heart"\|"roam"\|"similar_song"})` | 按当前歌曲为种子生成队列 |
+| 「播放我的歌单」 | 先 `netease_player({action:"search", type:"playlist", query:"…"})` 再 `netease_play({playlistId})` | 播放整张歌单 |
+| 「现在在放什么 / 暂停 / 下一首 / 调小音量 / 收藏这首」 | `netease_player({action:"status"\|"pause"\|"next"\|"volume"\|"like"})` | 控制同一个播放器 |
+
+播放**不会切换你的面板**，也不启动桌面网易云客户端；`cloud_music_play` / `cloud_music_login` 已被守卫拦截，模型会被引导到插件播放器与面板扫码。
 
 ## 配置
 
@@ -89,10 +105,13 @@ Host 侧支持环境变量（一般不需要）：
 | `DSH_NETEASE_MUSIC_DIR` | `~/.dsh/netease-panel` | 登录态与日志目录 |
 | `DSH_NETEASE_PYTHON` | `engine/cloud-music-mcp/.venv/bin/python` | 引擎解释器 |
 | `DSH_NETEASE_BRIDGE` | `server/bridge.py` | 引擎脚本 |
+| `DSH_NETEASE_ENGINE_DIR` | `<插件目录>/engine/cloud-music-mcp` | 引擎安装目录 |
+| `DSH_NETEASE_UV` | 自动探测 | uv 可执行文件路径 |
 
 ## 故障排查
 
-- 面板提示「数据引擎尚未安装」：回到「安装」第 1 步建 venv。
+- 面板提示「数据引擎尚未安装」：正常会自动安装；失败时点「重试」，或看 `~/.dsh/netease-panel/install.log`。
+- 已经装好但对话里说放歌没反应：确认左侧栏播放器可手动播放（需要页面刷新到最新版本），并检查 `~/.dsh/netease-panel/bridge.log`。
 - 扫码后一直 waiting：检查网络（网易云接口在国内网络需要代理时，给引擎加代理环境变量），日志在 `~/.dsh/netease-panel/bridge.log`。
 - 某首歌点了没声音：会员/版权限制，`/api/audio` 会返回「这首歌暂时没有可播放的音源」；播放条会跳到下一首。
 - 想清空登录态：面板账号菜单「退出登录」，或删除 `~/.dsh/netease-panel/cookies.json`。
@@ -113,11 +132,13 @@ Host 侧支持环境变量（一般不需要）：
 ## 开发与验证
 
 - 契约：`docs/CONTRACT.md`（数据形状 / 路由 / 播放器 store / 视觉规范 / 测试钩子）。
-- 数据引擎自测（真实网络）：`cd dsh-netease-music && node server/selftest.mjs` → 27/27。
-- Host 冒烟：`node --check index.js`，用假引擎驱动全部 17 条路由（28 项断言）。
-- 真实联调：真实 bridge + 真实网易云音源，14/14 通过；headless Chrome 里 `<audio>` 真实播放 120 万字节 mp3，`currentTime` 前进、`readyState=4`。
-- UI 离线验收：`cd netease-panel-selftest && node run.mjs` → **PASS 92 / FAIL 0**（headless Chrome CDP，16 张截图，见 `netease-panel-selftest/shots/`）。
+- 引擎自测（真实网络，登录态）：`cd dsh-netease-music && node server/selftest.mjs` → **41/41**（含 like 收藏、模式接口、匿名降级、回滚不污染收藏）。
+- Host 冒烟：`node --check index.js` + 假引擎/假 ctx 驱动路由与 Agent 工具（工具定义、守卫、命令队列、状态上报）。
+- 真实联调：真实 bridge + 真实网易云音源；headless Chrome 里 `<audio>` 真实播放 mp3/FLAC（无损 1.5 Mbps），`currentTime` 前进、`readyState=4`。
+- 浏览器端验收：`cd selftest && node run.mjs` → **PASS 342 / FAIL 0**（headless Chrome CDP，39 张截图）。
 - 侧栏图标：官方网易云红底白色音符标志，128px PNG 内联为 dataURL（`client.js` 的 `ICON_DATA`），深/浅色都保持红色；插件管理页图标为 `assets/icon.png`。
+
+## 截图
 
 ![侧栏图标（深色）](docs/sidebar-icon-dark.png)
 ![首页轮播·心动模式](docs/screenshot-hero-carousel.png)
