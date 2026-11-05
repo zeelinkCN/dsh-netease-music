@@ -1462,41 +1462,58 @@ try {
     check('mini 左右边缘与 footer 对齐（x 差 <1px）',
       Math.abs(mini.miniLeft - mini.footerLeft) < 1 && Math.abs(mini.miniRight - mini.footerRight) < 1, JSON.stringify(mini))
     check('footer 无横向溢出', mini.footerScrollW <= mini.footerClientW + 1, JSON.stringify(mini))
-    check('mini 高度 76–90px（两行布局）', mini.miniH >= 76 && mini.miniH <= 90, JSON.stringify(mini))
+    check('mini 高度 78–92px（两行布局）', mini.miniH >= 78 && mini.miniH <= 92, JSON.stringify(mini))
     check('mini 不与 Settings 行重叠', mini.miniBottom <= mini.settingsTop + 1, JSON.stringify(mini))
     check('mini 有 prev/toggle/next/volume 控件',
       mini.hasPrev && mini.hasToggle && mini.hasNext && mini.hasVolume, JSON.stringify(mini))
-    const spread = await evaluate(`(() => {
+    const miniLayout = await evaluate(`(() => {
       const card = document.querySelector('[data-nm="mini-player"]')
-      const names = ['mini-prev', 'mini-toggle', 'mini-next', 'mini-volume']
+      const vol = document.querySelector('[data-nm="mini-volume"]')
+      const names = ['mini-prev', 'mini-toggle', 'mini-next']
       const els = names.map((n) => document.querySelector('[data-nm="' + n + '"]'))
-      if (!card || els.some((e) => !e)) return null
+      if (!card || !vol || els.some((e) => !e)) return null
       const cr = card.getBoundingClientRect()
+      const vr = vol.getBoundingClientRect()
       const centers = els.map((el) => {
         const r = el.getBoundingClientRect()
         return Math.round((r.left + r.right) / 2)
       })
       const sorted = centers.slice().sort((a, b) => a - b)
       const gaps = sorted.slice(1).map((c, i) => c - sorted[i])
+      const cardCenter = Math.round((cr.left + cr.right) / 2)
+      const toggleEl = document.querySelector('[data-nm="mini-toggle"]')
+      const tr = toggleEl.getBoundingClientRect()
+      const toggleCenter = Math.round((tr.left + tr.right) / 2)
       return {
         cardLeft: Math.round(cr.left),
         cardRight: Math.round(cr.right),
+        cardTop: Math.round(cr.top),
         cardW: Math.round(cr.width),
-        centers,
-        leftGap: sorted[0] - Math.round(cr.left),
-        rightGap: Math.round(cr.right) - sorted[sorted.length - 1],
-        span: sorted[sorted.length - 1] - sorted[0],
-        spanRatio: Math.round(((sorted[sorted.length - 1] - sorted[0]) / cr.width) * 1000) / 1000,
-        minGap: Math.min.apply(null, gaps),
+        cardH: Math.round(cr.height),
+        cardCenter,
+        volCenterY: Math.round((vr.top + vr.bottom) / 2),
+        volRightGap: Math.round(cr.right - vr.right),
+        transportCenters: sorted,
+        leftPad: sorted[0] - Math.round(cr.left),
+        rightPad: Math.round(cr.right) - sorted[sorted.length - 1],
+        toggleCenter,
+        toggleCenterDiff: Math.abs(toggleCenter - cardCenter),
         gaps,
+        gapDiff: gaps.length === 2 ? Math.abs(gaps[0] - gaps[1]) : null,
       }
     })()`)
-    check('mini 控件横向铺开：左右留白均 ≥8px',
-      !!spread && spread.leftGap >= 8 && spread.rightGap >= 8, JSON.stringify(spread))
-    check('mini 控件首尾中心跨度 / 卡片宽 ≥0.65',
-      !!spread && spread.spanRatio >= 0.65, JSON.stringify(spread && { spanRatio: spread.spanRatio, span: spread.span, cardW: spread.cardW }))
-    check('mini 相邻控件中心距 ≥24px',
-      !!spread && spread.minGap >= 24, JSON.stringify(spread && { minGap: spread.minGap, gaps: spread.gaps }))
+    check('音量键在第一行（center.y < 卡片 top+44）且右侧留白 ≥8px',
+      !!miniLayout && miniLayout.volCenterY < miniLayout.cardTop + 44 && miniLayout.volRightGap >= 8,
+      JSON.stringify(miniLayout && { cardTop: miniLayout.cardTop, volCenterY: miniLayout.volCenterY, volRightGap: miniLayout.volRightGap }))
+    check('三个传输键水平居中（左右留白差 <4px）',
+      !!miniLayout && Math.abs(miniLayout.leftPad - miniLayout.rightPad) < 4,
+      JSON.stringify(miniLayout && { leftPad: miniLayout.leftPad, rightPad: miniLayout.rightPad }))
+    check('mini-toggle 中心与卡片中心差 ≤3px',
+      !!miniLayout && miniLayout.toggleCenterDiff <= 3,
+      JSON.stringify(miniLayout && { toggleCenter: miniLayout.toggleCenter, cardCenter: miniLayout.cardCenter, diff: miniLayout.toggleCenterDiff }))
+    check('三个传输键相邻中心距差 <4px（对称等距）',
+      !!miniLayout && miniLayout.gapDiff != null && miniLayout.gapDiff < 4,
+      JSON.stringify(miniLayout && { gaps: miniLayout.gaps, gapDiff: miniLayout.gapDiff }))
     // prev / next 切歌
     const idA = await audioTrackId()
     check('点 mini-next', await clickSel('[data-nm="mini-next"]'))
@@ -1524,20 +1541,50 @@ try {
     } catch (err) {
       check('点 mini-prev 后当前曲目变化', false, String(err))
     }
-    // 音量
+    // 音量：浮层滑杆，卡片几何不变
+    const geomBefore = await evaluate(`(() => {
+      const el = document.querySelector('[data-nm="mini-player"]')
+      const r = el.getBoundingClientRect()
+      return { w: Math.round(r.width * 100) / 100, h: Math.round(r.height * 100) / 100 }
+    })()`)
     const mute0 = await evaluate(`(() => { const a = document.querySelector('audio[data-nm-audio]'); return a ? a.muted : null })()`)
     check('点 mini-volume', await clickSel('[data-nm="mini-volume"]'))
     await sleep(450)
-    const volState = await evaluate(`(() => {
+    const readVol = () => evaluate(`(() => {
       const a = document.querySelector('audio[data-nm-audio]')
-      const ranges = [...document.querySelectorAll('input[type="range"]')].filter((el) => {
-        const r = el.getBoundingClientRect()
-        return r.width > 0 && r.height > 0
-      })
-      return { muted: a ? a.muted : null, rangeCount: ranges.length, pop: !!document.querySelector('[class*="volume-pop"], [class*="volume-slider"]') }
+      const visible = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 }
+      const ranges = [...document.querySelectorAll('input[type="range"]')].filter(visible)
+      const pops = [...document.querySelectorAll('[class*="volume-pop"], [class*="volume-slider"], [class*="volume-popover"]')].filter(visible)
+      return { muted: a ? a.muted : null, ranges: ranges.length, pops: pops.length }
     })()`)
+    let volState = await readVol()
+    if (volState.ranges === 0 && volState.pops === 0) {
+      // 桌面端音量滑杆是 hover/focus 浮层：补一次 hover+focus 再采样
+      await evaluate(`(() => {
+        const v = document.querySelector('[data-nm="mini-volume"]')
+        if (!v) return
+        const wrap = v.closest('[class*="volume"]') || v.parentElement || v
+        v.focus()
+        wrap.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }))
+        wrap.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }))
+        v.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }))
+        v.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }))
+      })()`)
+      await sleep(450)
+      volState = await readVol()
+    }
+    const geomAfter = await evaluate(`(() => {
+      const el = document.querySelector('[data-nm="mini-player"]')
+      const r = el.getBoundingClientRect()
+      return { w: Math.round(r.width * 100) / 100, h: Math.round(r.height * 100) / 100 }
+    })()`)
+    check('点/聚焦音量后出现浮层滑杆（不占卡片布局）',
+      volState.ranges > 0 || volState.pops > 0, JSON.stringify(volState))
+    check('音量浮层不改变卡片几何（宽/高差 <1px）',
+      Math.abs(geomAfter.w - geomBefore.w) < 1 && Math.abs(geomAfter.h - geomBefore.h) < 1,
+      JSON.stringify({ before: geomBefore, after: geomAfter }))
     check('点音量按钮静音翻转或出现音量滑杆',
-      (volState.muted !== mute0) || volState.rangeCount > 0 || volState.pop,
+      (volState.muted !== mute0) || volState.ranges > 0 || volState.pops > 0,
       JSON.stringify({ mute0, volState }))
     if (volState.muted === true) {
       await evaluate(`(() => { const a = document.querySelector('audio[data-nm-audio]'); if (a) a.muted = false })()`)

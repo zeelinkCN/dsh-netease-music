@@ -3030,7 +3030,24 @@ window.__ModuleLoader__.load({
             onClick: open,
           },
           h('span', { className: 'nm-mini-name' }, track.name),
-          h('span', { className: 'nm-mini-artist' }, trackArtists(track)))),
+          h('span', { className: 'nm-mini-artist' }, trackArtists(track))),
+          h('div', { className: 'nm-mini-volume-wrap' },
+            h('button', {
+              type: 'button',
+              className: 'nm-mini-ctrl nm-mini-volume-btn',
+              'data-nm': 'mini-volume',
+              title: snapshot.muted ? t('action.unmute') : t('action.mute'),
+              'aria-label': snapshot.muted ? t('action.unmute') : t('action.mute'),
+              onClick: () => player.toggleMute(),
+            }, h(Icon, { name: snapshot.muted ? 'mute' : 'volume', size: 14 })),
+            h('div', { className: 'nm-mini-volume-pop' },
+              h(Slider, {
+                value: snapshot.muted ? 0 : snapshot.volume,
+                step: 0.05,
+                label: t('action.volume'),
+                className: 'nm-mini-volume-slider',
+                onCommit: (ratio) => player.setVolume(ratio),
+              })))),
         h('div', { className: 'nm-mini-controls' },
           h('button', {
             type: 'button',
@@ -3055,24 +3072,7 @@ window.__ModuleLoader__.load({
             title: t('action.next'),
             'aria-label': t('action.next'),
             onClick: () => player.next(false),
-          }, h(Icon, { name: 'next', size: 14 })),
-          h('div', { className: 'nm-mini-volume-wrap' },
-            h('button', {
-              type: 'button',
-              className: 'nm-mini-ctrl',
-              'data-nm': 'mini-volume',
-              title: snapshot.muted ? t('action.unmute') : t('action.mute'),
-              'aria-label': snapshot.muted ? t('action.unmute') : t('action.mute'),
-              onClick: () => player.toggleMute(),
-            }, h(Icon, { name: snapshot.muted ? 'mute' : 'volume', size: 14 })),
-            h('div', { className: 'nm-mini-volume-pop' },
-              h(Slider, {
-                value: snapshot.muted ? 0 : snapshot.volume,
-                step: 0.05,
-                label: t('action.volume'),
-                className: 'nm-mini-volume-slider',
-                onCommit: (ratio) => player.setVolume(ratio),
-              })))),
+          }, h(Icon, { name: 'next', size: 14 }))),
         progress)
 
     }
@@ -4397,21 +4397,22 @@ window.__ModuleLoader__.load({
     .nm-mini-name{font-size:11.5px;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.35}
     .nm-mini-artist{font-size:10px;color:var(--nm-t3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.35}
     .nm-mini-controls{
-      display:flex;align-items:center;justify-content:space-between;
-      flex:none;width:100%;padding:0 2px;margin-top:1px;min-width:0;
+      display:flex;align-items:center;justify-content:center;gap:36px;
+      flex:none;width:100%;padding:0;margin-top:1px;min-width:0;
     }
     .nm-mini-ctrl{
-      width:29px;height:29px;border:0;border-radius:7px;background:none;padding:0;
+      width:28px;height:28px;border:0;border-radius:7px;background:none;padding:0;
       display:grid;place-items:center;color:var(--nm-t2);cursor:pointer;flex:none;
     }
     .nm-mini-ctrl:hover{background:var(--nm-fill);color:var(--nm-t1)}
     .nm-mini-toggle{
-      width:30px;height:30px;border-radius:50%;border:0;display:grid;place-items:center;cursor:pointer;flex:none;
+      width:32px;height:32px;border-radius:50%;border:0;display:grid;place-items:center;cursor:pointer;flex:none;
       background:var(--nm-accent);color:var(--nm-on-accent);
       box-shadow:0 4px 12px -6px color-mix(in srgb,var(--nm-accent) 80%,transparent);
     }
     .nm-mini-toggle:hover{background:color-mix(in srgb,var(--nm-accent) 88%,#000)}
-    .nm-mini-volume-wrap{position:relative;display:flex;align-items:center;flex:none}
+    .nm-mini-volume-wrap{position:relative;display:flex;align-items:center;flex:none;margin-left:auto}
+    .nm-mini-volume-btn{width:28px;height:28px}
     .nm-mini-volume-pop{
       position:absolute;right:0;bottom:calc(100% + 6px);width:132px;padding:8px 10px;
       border-radius:10px;border:1px solid var(--nm-line);background:color-mix(in srgb,var(--nm-l2) 96%,transparent);
