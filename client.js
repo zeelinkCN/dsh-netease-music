@@ -190,6 +190,7 @@ window.__ModuleLoader__.load({
       'hero.retry': '重试',
       'hero.fallback': '已降级：{reason}',
       'toast.modeError': '暂时无法生成这个歌单，请稍后再试',
+      'toast.modeTimeout': '请求超时，请重试',
     }
     const EN = {
       'app.title': 'Netease Music',
@@ -371,6 +372,7 @@ window.__ModuleLoader__.load({
       'hero.retry': 'Retry',
       'hero.fallback': 'Fallback: {reason}',
       'toast.modeError': 'Could not build this mix, please try again',
+      'toast.modeTimeout': 'Request timed out, please retry',
     }
 
     /* ------------------------------------------------------------------ *
@@ -2189,14 +2191,45 @@ window.__ModuleLoader__.load({
           if (seedSongId) params.songId = seedSongId
           if (seedArtistId) params.artistId = seedArtistId
         }
-        apiGet('/mode?' + qs(params)).then((data) => {
-          const songs = toArray(data && data.songs)
+        let controller = null
+        try {
+          if (typeof AbortController === 'function') controller = new AbortController()
+        } catch (err) {
+          controller = null
+        }
+        let settled = false
+        const timeout = setTimeout(() => {
+          if (settled) return
+          settled = true
+          if (controller) {
+            try {
+              controller.abort()
+            } catch (err) {
+              /* ignore */
+            }
+          }
+          const message = t('toast.modeTimeout')
+          setModeMeta((prev) => Object.assign({}, prev, {
+            [mode.key]: { title: t(mode.title), subtitle: t(mode.desc), error: message, fallbackUsed: '' },
+          }))
+          if (props.onToast) props.onToast(message)
+          setPending('')
+        }, 8000)
+        const finish = () => {
+          if (settled) return
+          settled = true
+          clearTimeout(timeout)
+          setPending('')
+        }
+        apiGet('/mode?' + qs(params), controller ? controller.signal : undefined).then((data) => {
+          const songs = Array.isArray(data && data.songs) ? data.songs.filter(Boolean) : []
           if (!songs.length) {
             const message = (data && data.error) || t('toast.modeError')
             setModeMeta((prev) => Object.assign({}, prev, {
               [mode.key]: { title: t(mode.title), subtitle: t(mode.desc), error: message, fallbackUsed: '' },
             }))
             if (props.onToast) props.onToast(message)
+            finish()
             return
           }
           setModeMeta((prev) => Object.assign({}, prev, {
@@ -2207,14 +2240,23 @@ window.__ModuleLoader__.load({
               error: '',
             },
           }))
-          player.playQueue(songs, 0, (data && data.title) || t(mode.title))
+          try {
+            player.playQueue(songs, 0, (data && data.title) || t(mode.title))
+          } catch (err) {
+            const message = (err && err.message) || t('toast.modeError')
+            if (props.onToast) props.onToast(message)
+          }
+          finish()
         }).catch((err) => {
-          const message = (err && err.message) || t('toast.modeError')
+          if (settled) return
+          const aborted = !!err && (err.name === 'AbortError' || err.code === 'ABORT_ERR')
+          const message = aborted ? t('toast.modeTimeout') : ((err && err.message) || t('toast.modeError'))
           setModeMeta((prev) => Object.assign({}, prev, {
             [mode.key]: { title: t(mode.title), subtitle: t(mode.desc), error: message, fallbackUsed: '' },
           }))
           if (props.onToast) props.onToast(message)
-        }).then(() => setPending(''))
+          finish()
+        })
       }
 
       const playAll = () => {
@@ -2271,8 +2313,9 @@ window.__ModuleLoader__.load({
         role: clone ? undefined : 'button',
         tabIndex: clone ? -1 : 0,
         'aria-label': copyLabel(t, mode),
+        'aria-busy': pending === mode.key ? 'true' : 'false',
         onClick: () => {
-          if (suppressRef.current) return
+          if (suppressRef.current || pending) return
           playMode(mode)
         },
         onKeyDown: (event) => {
