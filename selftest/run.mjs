@@ -2788,6 +2788,219 @@ try {
   }
   await config({ likeAuthed: true, likeError: null })
 
+  console.log('\n[9f] v5 Agent 播放桥：player/commands 轮询 + player/state 上报')
+  // 干净加载：先重置 mock 播放器命令/状态，再 reload
+  await config({ playerCommand: null })
+  await reload()
+  try {
+    await waitFor(`document.querySelectorAll('[data-nm="track"]').length >= 5`, 'rows for agent bridge', 15000)
+    check('v5 页面加载后列表可用（agent 桥）', true)
+  } catch (err) {
+    check('v5 页面加载后列表可用（agent 桥）', false, String(err))
+  }
+  await evaluate(`window.__setActivePanel('netease-music')`)
+  await scrollTop()
+  await sleep(300)
+  const playerCall = (c) => c.path === '/netease-panel/api/player/commands'
+  let cmdCalls = (await calls()).filter(playerCall)
+  check('页面加载后客户端请求 /player/commands', cmdCalls.length > 0, JSON.stringify(cmdCalls.slice(0, 3)))
+  check('首次轮询不带 cursor（基线请求）', cmdCalls.length > 0 && !/cursor=/.test(cmdCalls[0].search || ''),
+    JSON.stringify({ first: cmdCalls[0] && cmdCalls[0].search }))
+  const firstCursorCallIdx = cmdCalls.findIndex((c) => /cursor=/.test(c.search || ''))
+  check('基线之后开始带 cursor 轮询', firstCursorCallIdx > 0, JSON.stringify(cmdCalls.slice(0, 4).map((c) => c.search)))
+  // 轮询频率 ≤1 次/秒（间隔 ≥1000ms 左右）且 5s 内请求数合理
+  const pollBefore = cmdCalls.length
+  const pollStartAt = Date.now()
+  await sleep(5400)
+  cmdCalls = (await calls()).filter(playerCall)
+  const pollNew = cmdCalls.slice(pollBefore)
+  const gaps = pollNew.slice(1).map((c, i) => c.at - pollNew[i].at)
+  const minGap = gaps.length ? Math.min(...gaps) : 0
+  check('轮询频率 ≤1 次/秒（无 <900ms 的连续轮询）', pollNew.length >= 2 && minGap >= 900,
+    JSON.stringify({ requestsIn5s: pollNew.length, minGap, gaps }))
+  check('轮询持续（5s 内 ≥3 次）', pollNew.length >= 3, JSON.stringify({ requestsIn5s: pollNew.length }))
+
+  // 注入 {type:'playQueue'}：2s 内播放、dock 出现、不切面板、POST 状态 current.id 一致
+  const agentTracks = [
+    { id: 1901371647, name: '水星记', artist: '郭顶', artists: [{ name: '郭顶' }], album: '飞行器的执行周期', duration: 8, cover: null },
+    { id: 1901371684, name: '晴天', artist: '周杰伦', artists: [{ name: '周杰伦' }], album: '叶惠美', duration: 8, cover: null },
+  ]
+  const panelBeforeAgent = await evaluate(`document.documentElement.getAttribute('data-active-panel')`)
+  await config({ playerCommand: { type: 'playQueue', tracks: agentTracks, title: 'Agent 测试队列' } })
+  let agentPlayed = false
+  try {
+    await waitFor(`(() => {
+      const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio')
+      if (!a || a.paused) return false
+      const m = /[?&]id=(\\d+)/.exec(a.getAttribute('src') || '')
+      return !!m && m[1] === '1901371647'
+    })()`, 'agent playQueue audio', 4000)
+    agentPlayed = true
+    check('注入 playQueue 后 2s 内 audio 开始播放首曲', true)
+  } catch (err) {
+    check('注入 playQueue 后 2s 内 audio 开始播放首曲', false, String(err))
+  }
+  check('注入播放不切换 active panel', (await evaluate(`document.documentElement.getAttribute('data-active-panel')`)) === panelBeforeAgent,
+    JSON.stringify({ before: panelBeforeAgent, after: await evaluate(`document.documentElement.getAttribute('data-active-panel')`) }))
+  check('注入 playQueue 后 dock 出现', await evaluate(`!!document.querySelector('[data-nm="dock"]')`))
+  let agentToast = null
+  try {
+    await waitFor(`(() => {
+      const t = document.querySelector('.nm-toast, [data-nm="toast"], [role="status"]')
+      return !!t && /开始播放|Agent 测试队列/.test(t.textContent || '')
+    })()`, 'agent play toast', 3000)
+    agentToast = await textOf('.nm-toast, [data-nm="toast"], [role="status"]')
+    check('注入 playQueue 后出现「开始播放」toast', true, (agentToast || '').slice(0, 40))
+  } catch (err) {
+    check('注入 playQueue 后出现「开始播放」toast', false, String(err))
+  }
+  const getPlayerState = () => evaluate(`fetch('/netease-panel/api/player/state').then(function (r) { return r.json() }).then(function (j) { return j && j.data ? j.data : null }).catch(function () { return null })`)
+  let state1 = null
+  try {
+    await waitFor(`fetch('/netease-panel/api/player/state').then(function (r) { return r.json() }).then(function (j) { return !!(j && j.data && j.data.current && j.data.current.id === 1901371647) }).catch(function () { return false })`, 'player state current id', 5000)
+    state1 = await getPlayerState()
+    check('POST /player/state 上报 current.id = 注入曲目', true)
+  } catch (err) {
+    state1 = await getPlayerState()
+    check('POST /player/state 上报 current.id = 注入曲目', false, JSON.stringify(state1))
+  }
+  check('player/state 字段完整（name/artist/album/liked）',
+    !!state1 && !!state1.current && state1.current.id === 1901371647 &&
+    state1.current.name === '水星记' && !!state1.current.artist && !!state1.current.album && typeof state1.current.liked === 'boolean',
+    JSON.stringify(state1 && state1.current))
+  check('player/state 队列/来源字段（queueLength≥2、contextTitle、queue≤20）',
+    !!state1 && state1.queueLength >= 2 && state1.contextTitle === 'Agent 测试队列' &&
+    Array.isArray(state1.queue) && state1.queue.length >= 2 && state1.queue.length <= 20,
+    JSON.stringify({ queueLength: state1 && state1.queueLength, contextTitle: state1 && state1.contextTitle, queueLen: state1 && state1.queue && state1.queue.length }))
+  const pos1 = state1 && state1.position
+  await sleep(1400)
+  const state2 = await getPlayerState()
+  check('player/state position 随时间递增', !!state1 && !!state2 && state2.position > pos1,
+    JSON.stringify({ pos1, pos2: state2 && state2.position }))
+  const postStateCount = async () => (await calls()).filter((c) => c.method === 'POST' && c.path === '/netease-panel/api/player/state').length
+  check('客户端持续 POST /player/state', (await postStateCount()) > 0, JSON.stringify({ posts: await postStateCount() }))
+
+  // control：pause / resume / next / prev / seek / volume
+  await config({ playerCommand: { type: 'control', action: 'pause' } })
+  try {
+    await waitFor(`(() => { const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio'); return !!a && a.paused === true })()`, 'agent pause', 3000)
+    check('注入 control pause 后 audio.paused=true', true)
+  } catch (err) {
+    check('注入 control pause 后 audio.paused=true', false, String(err))
+  }
+  try {
+    await waitFor(`fetch('/netease-panel/api/player/state').then(function (r) { return r.json() }).then(function (j) { return !!(j && j.data && j.data.playing === false) })`, 'state paused', 3000)
+    check('pause 后上报 playing=false', true)
+  } catch (err) {
+    check('pause 后上报 playing=false', false, JSON.stringify(await getPlayerState()))
+  }
+  await config({ playerCommand: { type: 'control', action: 'resume' } })
+  try {
+    await waitFor(`(() => { const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio'); return !!a && a.paused === false })()`, 'agent resume', 3000)
+    check('注入 control resume 后恢复播放', true)
+  } catch (err) {
+    check('注入 control resume 后恢复播放', false, String(err))
+  }
+  await config({ playerCommand: { type: 'control', action: 'next' } })
+  try {
+    await waitFor(`(() => { const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio'); if (!a) return false; const m = /[?&]id=(\\d+)/.exec(a.getAttribute('src') || ''); return !!m && m[1] === '1901371684' })()`, 'agent next', 4000)
+    check('注入 control next 后切到第二首', true)
+  } catch (err) {
+    check('注入 control next 后切到第二首', false, String(err))
+  }
+  try {
+    await waitFor(`fetch('/netease-panel/api/player/state').then(function (r) { return r.json() }).then(function (j) { return !!(j && j.data && j.data.current && j.data.current.id === 1901371684) })`, 'state next id', 4000)
+    check('切歌后上报 current.id 更新', true)
+  } catch (err) {
+    check('切歌后上报 current.id 更新', false, JSON.stringify(await getPlayerState()))
+  }
+  await config({ playerCommand: { type: 'control', action: 'prev' } })
+  try {
+    await waitFor(`(() => { const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio'); if (!a) return false; const m = /[?&]id=(\\d+)/.exec(a.getAttribute('src') || ''); return !!m && m[1] === '1901371647' })()`, 'agent prev', 4000)
+    check('注入 control prev 后回到第一首', true)
+  } catch (err) {
+    check('注入 control prev 后回到第一首', false, String(err))
+  }
+  await config({ playerCommand: { type: 'control', action: 'seek', seconds: 3 } })
+  try {
+    await waitFor(`(() => { const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio'); return !!a && Math.abs(a.currentTime - 3) < 1.2 })()`, 'agent seek', 4000)
+    check('注入 control seek(3s) 后 currentTime≈3s', true)
+  } catch (err) {
+    const t = await evaluate(`(() => { const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio'); return a ? a.currentTime : null })()`)
+    check('注入 control seek(3s) 后 currentTime≈3s', false, JSON.stringify({ currentTime: t }))
+  }
+  await config({ playerCommand: { type: 'control', action: 'volume', volume: 0.3 } })
+  try {
+    await waitFor(`(() => { const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio'); return !!a && Math.abs(a.volume - 0.3) < 0.06 })()`, 'agent volume', 3000)
+    check('注入 control volume(0.3) 后 audio.volume≈0.3', true)
+  } catch (err) {
+    const v = await evaluate(`(() => { const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio'); return a ? a.volume : null })()`)
+    check('注入 control volume(0.3) 后 audio.volume≈0.3', false, JSON.stringify({ volume: v }))
+  }
+
+  // refreshLike：三处红心同步
+  await config({ playerCommand: { type: 'refreshLike', id: 1901371647, liked: true } })
+  try {
+    await waitFor(`(() => { const b = document.querySelector('[data-nm="dock-like"]'); return !!b && b.getAttribute('data-liked') === 'true' })()`, 'agent refreshLike dock', 3000)
+    check('注入 refreshLike 后 dock-like data-liked=true', true)
+  } catch (err) {
+    check('注入 refreshLike 后 dock-like data-liked=true', false, String(err))
+  }
+  if (!(await evaluate(`!!document.querySelector('[data-nm="nowplaying"]')`))) {
+    await evaluate(`(() => { const b = document.querySelector('[data-nm="dock-cover"]'); if (b) b.click() })()`)
+    try { await waitFor(`!!document.querySelector('[data-nm="nowplaying"]')`, 'nowplaying for agent like', 5000) } catch { /* ignore */ }
+  }
+  const npLikeAgent = await evaluate(`(() => { const b = document.querySelector('[data-nm="np-like"]'); return b ? b.getAttribute('data-liked') : null })()`)
+  check('refreshLike 后播放页 np-like data-liked=true', npLikeAgent === 'true', JSON.stringify({ npLikeAgent }))
+  await evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`)
+  await sleep(500)
+  await scrollTop()
+  // 列表对应行红心
+  const agentRow = await evaluate(`(() => {
+    const row = [...document.querySelectorAll('[data-nm="track"]')].find((r) => String(r.getAttribute('data-id')) === '1901371647')
+    if (!row) return null
+    row.scrollIntoView({ block: 'center' })
+    const r = row.getBoundingClientRect()
+    return { x: Math.round(r.left + r.width * 0.5), y: Math.round(r.top + r.height / 2) }
+  })()`)
+  if (agentRow) {
+    await dispatchMouse('mouseMoved', agentRow.x, agentRow.y)
+    await sleep(350)
+    const trackLikeAgent = await evaluate(`(() => { const b = document.querySelector('[data-nm="track-like"]'); return b ? b.getAttribute('data-liked') : null })()`)
+    check('refreshLike 后列表对应 track-like data-liked=true', trackLikeAgent === 'true', JSON.stringify({ trackLikeAgent }))
+  }
+
+  // 对话页 + 左侧 mini 播放器（agent-play.png），命令播放不切面板
+  await evaluate(`window.__setSidebarWide(true)`)
+  await evaluate(`window.__setActivePanel('conversation')`)
+  await sleep(600)
+  const miniInfo = await evaluate(`(() => {
+    const mini = document.querySelector('[data-nm="mini-player"]')
+    return mini ? { exists: true, text: (mini.textContent || '').trim().slice(0, 80) } : { exists: false }
+  })()`)
+  check('对话页（面板隐藏）时左侧 mini-player 出现并显示注入曲目', !!miniInfo && miniInfo.exists && /晴天|水星记/.test(miniInfo.text), JSON.stringify(miniInfo))
+  await S('agent-play.png')
+  await evaluate(`window.__setActivePanel('netease-music')`)
+  await sleep(400)
+
+  // cleanup：重载后只有新页面的轮询，不报错
+  const cleanBeforeReload = (await calls()).filter(playerCall).length
+  await reload()
+  try {
+    await waitFor(`document.querySelectorAll('[data-nm="track"]').length >= 5`, 'rows after agent reload', 15000)
+    await sleep(2600)
+    const cmdsAfterReload = (await calls()).filter(playerCall)
+    const newOnes = cmdsAfterReload.slice(cleanBeforeReload)
+    check('重载后重新从基线开始轮询（首请求不带 cursor）',
+      newOnes.length > 0 && !/cursor=/.test(newOnes[0].search || ''),
+      JSON.stringify({ count: newOnes.length, first: newOnes[0] && newOnes[0].search }))
+    check('重载后轮询未叠加（2.6s 内新增 ≤4 次）', newOnes.length <= 4, JSON.stringify({ count: newOnes.length }))
+  } catch (err) {
+    check('重载后重新从基线开始轮询（首请求不带 cursor）', false, String(err))
+  }
+  await evaluate(`window.__setActivePanel('netease-music')`)
+  await sleep(300)
+
   console.log('\n[8] 运行期错误')
   const realErrors = errors.filter((e) => !/favicon|ERR_ABORTED/.test(e))
   check('无 console.error', realErrors.length === 0, realErrors.slice(0, 4).join(' | '))

@@ -24,6 +24,7 @@
 - **扫码登录**：面板内直接出二维码，手机网易云 App 扫一扫；登录态只存在本机，会员账号解锁高音质。
 - **三种听歌入口**：推荐（今日推荐 / 推荐歌单 / 收藏歌手）、歌单（我的/收藏，全量曲目）、搜索（单曲/歌单/歌手/专辑）；另有歌单 / 专辑 / 歌手详情页。
 - **首次安装即自动装好数据引擎**（cloud-music-mcp）：无需命令行，面板内可视化进度与日志。
+- **对话里直接点歌**：在任意对话里说「放首歌 / 来点周杰伦 / 听心动模式」，AI 会调用插件工具 `netease_play` 在 Harness 内置播放器播放（不启动桌面客户端）；`netease_player` 可查当前播放、暂停/继续/切歌/跳进度/调音量/收藏。MCP 里会「唤起桌面客户端」的 `cloud_music_play` / `cloud_music_login` 已被拦截。
 
 ## 数据来源
 
@@ -128,6 +129,7 @@ Host 侧支持环境变量（一般不需要）：
 ![侧栏收起为 56px 的迷你按钮](docs/screenshot-mini-rail.png)
 ![滚动后贴顶的不透明标题栏](docs/screenshot-header-scrolled.png)
 ![引擎无感安装](docs/screenshot-install-progress.png)
+![对话页里点歌（左侧迷你播放器）](docs/screenshot-agent-play.png)
 
 ## 已知局限
 

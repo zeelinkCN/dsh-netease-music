@@ -195,6 +195,7 @@ window.__ModuleLoader__.load({
       'hero.fallback': '已降级：{reason}',
       'toast.modeError': '暂时无法生成这个歌单，请稍后再试',
       'toast.modeTimeout': '请求超时，请重试',
+      'toast.agentPlay': '开始播放：{title}',
     }
     const EN = {
       'app.title': 'Netease Music',
@@ -381,6 +382,7 @@ window.__ModuleLoader__.load({
       'hero.fallback': 'Fallback: {reason}',
       'toast.modeError': 'Could not build this mix, please try again',
       'toast.modeTimeout': 'Request timed out, please retry',
+      'toast.agentPlay': 'Now playing: {title}',
     }
 
     /* ------------------------------------------------------------------ *
@@ -1134,6 +1136,25 @@ window.__ModuleLoader__.load({
         }
       }
 
+      function pause() {
+        if (!state.current || !audio) return
+        try {
+          audio.pause()
+        } catch (err) {
+          /* ignore */
+        }
+        patch({ playing: false })
+      }
+
+      function resume() {
+        if (!state.current) return
+        if (state.error) {
+          loadCurrent(true)
+          return
+        }
+        requestPlay()
+      }
+
       function next(auto) {
         const queue = state.queue
         if (!queue.length) return
@@ -1337,6 +1358,8 @@ window.__ModuleLoader__.load({
         playOne,
         enqueue,
         toggle,
+        pause,
+        resume,
         next,
         prev,
         jump,
@@ -1640,15 +1663,25 @@ window.__ModuleLoader__.load({
     const likeQueue = new Set()
     let likeFlushTimer = null
     let likeGlobalToast = null
+    let uiToastSink = null
     /* 服务端 /like/status 返回的登录态；false 时红心置灰、点击只提示登录，绝不发 POST */
     let likeServerAuthed = null
 
     function setLikeToast(fn) {
       likeGlobalToast = fn || null
+      uiToastSink = fn || null
+    }
+
+    function setUiToast(fn) {
+      uiToastSink = fn || null
     }
 
     function pushLikeToast(message) {
       if (typeof likeGlobalToast === 'function' && message) likeGlobalToast(message)
+    }
+
+    function pushUiToast(message) {
+      if (typeof uiToastSink === 'function' && message) uiToastSink(message)
     }
 
     function notifyLike(changedId) {
@@ -1704,6 +1737,18 @@ window.__ModuleLoader__.load({
       }).catch(() => {
         /* 状态查询失败保持未知，不打扰用户 */
       })
+    }
+
+    function getLikeCached(trackId) {
+      return likeCache.get(String(trackId === undefined || trackId === null ? '' : trackId)) === true
+    }
+
+    function applyServerLike(trackId, liked) {
+      const id = String(trackId === undefined || trackId === null ? '' : trackId)
+      if (!id) return
+      likeCache.set(id, !!liked)
+      likeCheckedAt.set(id, Date.now())
+      notifyLike(id)
     }
 
     function toggleLike(trackId, t) {
@@ -3890,7 +3935,11 @@ window.__ModuleLoader__.load({
       const [toast, setToast] = React.useState(null)
       React.useEffect(() => {
         setLikeToast(setToast)
-        return () => setLikeToast(null)
+        setUiToast(setToast)
+        return () => {
+          setLikeToast(null)
+          setUiToast(null)
+        }
       }, [])
       const npIsOpen = useNpOpen()
       const [install, setInstall] = React.useState({ state: 'idle', phase: '', lines: [], error: '' })
@@ -5608,6 +5657,189 @@ window.__ModuleLoader__.load({
             window.removeEventListener('pointercancel', notify)
           }
         }, 'netease-music: seek pointer guard')
+
+        /* 2.5) Agent 播放桥：轮询 Host 命令 + 上报播放状态（不依赖面板可见） */
+        effect(() => {
+          let disposed = false
+          let commandCursor = null
+          let pollTimer = null
+          let stateTimer = null
+          let stateDebounce = null
+          let lastStateSent = 0
+          const controllers = new Set()
+
+          const openController = () => {
+            const controller = new AbortController()
+            controllers.add(controller)
+            return controller
+          }
+          const closeController = (controller) => {
+            controllers.delete(controller)
+          }
+
+          const agentAlbum = (track) => {
+            const value = track && track.album
+            if (typeof value === 'string') return value
+            return (value && value.name) || ''
+          }
+
+          const normalizeAgentTrack = (raw) => {
+            if (!raw || typeof raw !== 'object') return null
+            let artists = []
+            if (Array.isArray(raw.artists)) {
+              artists = raw.artists
+                .map((artist) => (typeof artist === 'string' ? { name: artist } : artist))
+                .filter((artist) => artist && artist.name)
+            } else if (raw.artist) {
+              artists = [{ name: String(raw.artist) }]
+            }
+            const album = agentAlbum(raw)
+            const cover = httpsUrl(raw.cover || raw.picUrl || (raw.album && (raw.album.picUrl || raw.album.cover)) || '')
+            return Object.assign({}, raw, {
+              id: raw.id,
+              name: raw.name || raw.title || '',
+              artists,
+              album,
+              cover,
+              duration: Number(raw.duration) || 0,
+            })
+          }
+
+          const normalizeAgentTracks = (list) => toArray(list).map(normalizeAgentTrack).filter(Boolean)
+
+          const handleAgentCommand = (command) => {
+            if (!command || typeof command !== 'object') return
+            const type = String(command.type || '')
+            if (type === 'playQueue') {
+              const tracks = normalizeAgentTracks(command.tracks)
+              if (!tracks.length) return
+              const title = String(command.title || '').trim() || (tracks[0] && tracks[0].name) || translate('player.nowPlaying')
+              player.playQueue(tracks, 0, title)
+              /* 不切换面板：用户可能正在对话页边工作边听，只给一条轻提示 */
+              pushUiToast(translate('toast.agentPlay', { title }))
+              return
+            }
+            if (type === 'control') {
+              const action = String(command.action || '')
+              if (action === 'pause') player.pause()
+              else if (action === 'resume') player.resume()
+              else if (action === 'next') player.next(false)
+              else if (action === 'prev') player.prev()
+              else if (action === 'seek') player.seekSeconds(Math.max(0, Number(command.seconds) || 0) * 1000)
+              else if (action === 'volume') player.setVolume(clamp(Number(command.volume), 0, 1))
+              return
+            }
+            if (type === 'refreshLike') {
+              applyServerLike(command.id, command.liked === true)
+            }
+          }
+
+          const delayPoll = () => {
+            if (disposed) return
+            pollTimer = setTimeout(pollCommands, 1200)
+          }
+
+          const pollCommands = () => {
+            if (disposed) return
+            const controller = openController()
+            const suffix = commandCursor === null ? '' : '?cursor=' + encodeURIComponent(String(commandCursor))
+            apiGet('/player/commands' + suffix, controller.signal).then((data) => {
+              if (disposed) return
+              /* 不带 cursor 的首次响应只取基线，避免重放历史命令 */
+              const nextCursor = data && Number(data.cursor)
+              if (Number.isFinite(nextCursor)) commandCursor = nextCursor
+              const commands = Array.isArray(data && data.commands) ? data.commands : []
+              commands.forEach((command) => {
+                try {
+                  handleAgentCommand(command)
+                } catch (err) {
+                  /* 单条命令失败不影响轮询 */
+                }
+              })
+            }).catch(() => {
+              /* 旧 Host 没有该路由 / 网络错误：静默重试 */
+            }).then(() => {
+              closeController(controller)
+              delayPoll()
+            })
+          }
+
+          const buildPlayerState = () => {
+            const snapshot = player.getState()
+            const mapTrack = (track) => {
+              if (!track) return null
+              return {
+                id: Number(track.id) || null,
+                name: track.name || '',
+                artist: trackArtists(track),
+                album: agentAlbum(track),
+                liked: getLikeCached(track.id),
+              }
+            }
+            return {
+              current: mapTrack(snapshot.current),
+              playing: !!snapshot.playing,
+              loading: !!snapshot.loading,
+              position: Math.round(Number(snapshot.position) || 0),
+              duration: Math.round(Number(snapshot.duration) || 0),
+              quality: snapshot.quality || '',
+              actualLevel: snapshot.actualLevel || '',
+              queueLength: Array.isArray(snapshot.queue) ? snapshot.queue.length : 0,
+              contextTitle: snapshot.contextTitle || '',
+              queue: (Array.isArray(snapshot.queue) ? snapshot.queue : []).slice(0, 20).map(mapTrack).filter(Boolean),
+            }
+          }
+
+          const sendPlayerState = () => {
+            if (disposed) return
+            lastStateSent = Date.now()
+            apiPost('/player/state', buildPlayerState()).catch(() => {
+              /* 旧 Host / 网络错误：静默 */
+            })
+          }
+
+          const schedulePlayerState = () => {
+            if (disposed || stateDebounce) return
+            const wait = Math.max(0, 800 - (Date.now() - lastStateSent))
+            stateDebounce = setTimeout(() => {
+              stateDebounce = null
+              sendPlayerState()
+            }, wait)
+          }
+
+          const unsubscribePlayer = player.subscribe(schedulePlayerState)
+          const likeListener = () => schedulePlayerState()
+          likeListeners.add(likeListener)
+          sendPlayerState()
+          stateTimer = setInterval(sendPlayerState, 2000)
+          pollCommands()
+
+          return () => {
+            disposed = true
+            if (pollTimer) {
+              clearTimeout(pollTimer)
+              pollTimer = null
+            }
+            if (stateTimer) {
+              clearInterval(stateTimer)
+              stateTimer = null
+            }
+            if (stateDebounce) {
+              clearTimeout(stateDebounce)
+              stateDebounce = null
+            }
+            unsubscribePlayer()
+            likeListeners.delete(likeListener)
+            Array.from(controllers).forEach((controller) => {
+              try {
+                controller.abort()
+              } catch (err) {
+                /* ignore */
+              }
+            })
+            controllers.clear()
+          }
+        }, 'netease-music: agent player bridge')
 
         /* 3) 文案：zh / en 注册 + bind；缺失时回退中文常量 */
         effect(() => {

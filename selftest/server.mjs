@@ -43,6 +43,7 @@ const cfg = {
   modeHangMs: 0,      // >0：/mode 响应挂起（模拟超时，UI 8s AbortController 兜底）
   likeAuthed: true,   // false：/like/status 返回 authed:false（未登录）
   likeError: null,    // true：like 接口返回 500
+  playerCommand: null, // 注入一条 player/commands 命令（playQueue/control/refreshLike…）
   engine: 'installed',   // installed | missing | installing | failed
   installError: false,
   install: { state: 'idle', phase: 'idle', lines: [], error: null, installed: true, startedAt: 0 },
@@ -336,6 +337,18 @@ function songUrl(id, requested) {
     trial,
     expiresAt: Date.now() + 300000,
   }
+}
+
+/* ------------------------------------------------------------------ *
+ * v5 插件内播放器：Agent 命令队列 + 客户端状态上报
+ * ------------------------------------------------------------------ */
+let playerSeq = 0
+let playerCommands = []
+let playerState = null
+function pushPlayerCommand(cmd) {
+  playerSeq += 1
+  playerCommands.push(Object.assign({ seq: playerSeq, at: Date.now() }, cmd))
+  return playerSeq
 }
 
 /* ------------------------------------------------------------------ *
@@ -656,6 +669,22 @@ async function handleApi(req, res, path, searchParams) {
       return ok(res, installSummary())
     }
 
+    case '/player/commands': {
+      const raw = searchParams.get('cursor')
+      if (raw === null || raw === '') return ok(res, { cursor: playerSeq, commands: [] })
+      const cursor = Number(raw) || 0
+      return ok(res, { cursor: playerSeq, commands: playerCommands.filter((cmd) => cmd.seq > cursor) })
+    }
+
+    case '/player/state': {
+      if (req.method === 'POST') {
+        const body = await readBody(req)
+        playerState = body && typeof body === 'object' ? body : null
+        return ok(res, { ok: true, at: Date.now() })
+      }
+      return ok(res, playerState || { current: null, playing: false, position: 0, duration: 0, updatedAt: null })
+    }
+
     case '/like/status': {
       if (cfg.likeError) return fail(res, 'NETWORK', '收藏状态加载失败（mock）', 500)
       return ok(res, likeStatus(searchParams.get('ids')))
@@ -733,6 +762,10 @@ const server = createServer(async (req, res) => {
     if (req.method === 'POST') {
       const patch = await readBody(req)
       Object.assign(cfg, patch)
+      if (patch.playerCommand && typeof patch.playerCommand === 'object') {
+        pushPlayerCommand(patch.playerCommand)
+        cfg.playerCommand = null
+      }
       if (patch.loginReset) loginCheckCount = 0
       // engine 状态变化时同步安装摘要，避免 install.installed=true 掩盖 engine:missing
       if ('engine' in patch) {
@@ -766,6 +799,9 @@ const server = createServer(async (req, res) => {
     cfg.likeError = null
     likedState.clear()
     for (const t of tracks) if (Number(t.id) % 2 === 0) likedState.set(String(t.id), true)
+    playerSeq = 0
+    playerCommands = []
+    playerState = null
     cfg.engine = 'installed'
     cfg.installError = false
     cfg.install = { state: 'idle', phase: 'idle', lines: [], error: null, installed: true, startedAt: 0 }
