@@ -128,6 +128,20 @@ Host 侧支持环境变量（一般不需要）：
 ![滚动后贴顶的不透明标题栏](docs/screenshot-header-scrolled.png)
 ![引擎无感安装](docs/screenshot-install-progress.png)
 
+## Windows 支持
+
+插件本身是「浏览器 UI + Node Host + Python 引擎」，同一套代码两个平台通用，已做跨平台处理：
+
+- venv 解释器：macOS/Linux `.venv/bin/python`，Windows `.venv/Scripts/python.exe`（Host 自动判断）。
+- 自动安装器：Windows 会找 `uv.exe`（`%USERPROFILE%\.local\bin`、`%LOCALAPPDATA%\Programs\uv`、WinGet Links 等）、用 `where uv`，
+  venv 里用 `pip.exe`；没有 uv 时退回系统 `python.exe`（需要 3.10+）。
+- 音频/图片代理、REST 路由、播放器逻辑都不依赖平台。
+- `cordis.patch.yml` 里 `netease-mcp` 的 `command` 是**绝对路径**，Windows 上改成：
+  `...\dsh-netease-music\engine\cloud-music-mcp\.venv\Scripts\cloud-music-mcp.exe`
+  （装好引擎后，`GET /netease-panel/api/status` 的 `mcpEntry` 字段会给出本机正确路径；不想要 Agent 工具也可以直接删掉这一行，面板功能不受影响）。
+
+> 说明：本项目在 macOS 上开发和验收；Windows 的布局差异（顶栏 caption 高度通过 `--dsh-frame-top-clearance` 自适应、侧栏 footer 槽位）逻辑上兼容，但尚未在 Windows 真机跑过，首次使用如遇留白/对齐问题请提 issue。
+
 ## 已知局限
 
 - 未登录（匿名）状态下，会员歌曲只能试听 128k/约 42 秒；登录自己的会员账号后才是完整音质。

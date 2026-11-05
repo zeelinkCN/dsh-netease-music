@@ -30,8 +30,16 @@ const ROUTE = '/netease-panel/api'
 const DATA_DIR = process.env.DSH_NETEASE_MUSIC_DIR || join(homedir(), '.dsh', 'netease-panel')
 const COOKIE_FILE = join(DATA_DIR, 'cookies.json')
 const LOG_FILE = join(DATA_DIR, 'bridge.log')
+const IS_WINDOWS = process.platform === 'win32'
 const ENGINE_DIR = process.env.DSH_NETEASE_ENGINE_DIR || join(ROOT, 'engine', 'cloud-music-mcp')
-const PYTHON = process.env.DSH_NETEASE_PYTHON || join(ENGINE_DIR, '.venv', 'bin', 'python')
+/** 跨平台 venv 解释器：macOS/Linux 在 bin/python，Windows 在 Scripts/python.exe */
+const VENV_PYTHON = IS_WINDOWS
+  ? join(ENGINE_DIR, '.venv', 'Scripts', 'python.exe')
+  : join(ENGINE_DIR, '.venv', 'bin', 'python')
+const VENV_SCRIPTS = join(ENGINE_DIR, '.venv', IS_WINDOWS ? 'Scripts' : 'bin')
+/** MCP stdio 入口（给 cordis.patch.yml 的 netease-mcp 行参考） */
+const MCP_ENTRY = join(VENV_SCRIPTS, IS_WINDOWS ? 'cloud-music-mcp.exe' : 'cloud-music-mcp')
+const PYTHON = process.env.DSH_NETEASE_PYTHON || VENV_PYTHON
 const BRIDGE = process.env.DSH_NETEASE_BRIDGE || join(ROOT, 'server', 'bridge.py')
 const LOG_MAX_BYTES = 2 * 1024 * 1024
 const UA =
@@ -559,6 +567,7 @@ export function apply(ctx) {
           const base = {
             engine: existsSync(PYTHON) ? 'installed' : install.state === 'running' ? 'installing' : install.state === 'failed' ? 'failed' : 'missing',
             engineDir: ENGINE_DIR,
+            mcpEntry: MCP_ENTRY,
             install: {
               state: install.state,
               phase: install.phase,

@@ -12,9 +12,10 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 const REPO_URL = 'https://github.com/Code-MonkeyZhang/cloud-music-mcp.git'
+const IS_WINDOWS = process.platform === 'win32'
 const LOG_MAX = 400
 
 export const ENGINE_REPO_DIR = 'cloud-music-mcp'
@@ -22,15 +23,23 @@ export const ENGINE_REPO_DIR = 'cloud-music-mcp'
 function findUv() {
   const explicit = process.env.DSH_NETEASE_UV
   if (explicit && existsSync(explicit)) return explicit
-  const candidates = [
-    join(homedir(), '.local', 'bin', 'uv'),
-    join(homedir(), '.cargo', 'bin', 'uv'),
-    '/opt/homebrew/bin/uv',
-    '/usr/local/bin/uv',
-  ]
-  for (const candidate of candidates) if (existsSync(candidate)) return candidate
-  const which = spawnSync('which', ['uv'], { encoding: 'utf8' })
-  const found = (which.stdout || '').trim()
+  const exe = IS_WINDOWS ? 'uv.exe' : 'uv'
+  const candidates = IS_WINDOWS
+    ? [
+        join(process.env.USERPROFILE || homedir(), '.local', 'bin', exe),
+        join(process.env.LOCALAPPDATA || '', 'Programs', 'uv', exe),
+        join(process.env.LOCALAPPDATA || '', 'Microsoft', 'WinGet', 'Links', exe),
+        join(homedir(), '.cargo', 'bin', exe),
+      ]
+    : [
+        join(homedir(), '.local', 'bin', exe),
+        join(homedir(), '.cargo', 'bin', exe),
+        '/opt/homebrew/bin/uv',
+        '/usr/local/bin/uv',
+      ]
+  for (const candidate of candidates) if (candidate && existsSync(candidate)) return candidate
+  const which = spawnSync(IS_WINDOWS ? 'where' : 'which', ['uv'], { encoding: 'utf8' })
+  const found = (which.stdout || '').split(/\r?\n/)[0].trim()
   if (found && existsSync(found)) return found
   return null
 }
@@ -38,7 +47,10 @@ function findUv() {
 function findPython() {
   const explicit = process.env.DSH_NETEASE_SYSTEM_PYTHON
   if (explicit && existsSync(explicit)) return explicit
-  for (const name of ['python3.13', 'python3.12', 'python3.11', 'python3.10', 'python3']) {
+  const names = IS_WINDOWS
+    ? ['python.exe', 'python3.exe', 'python', 'py']
+    : ['python3.13', 'python3.12', 'python3.11', 'python3.10', 'python3']
+  for (const name of names) {
     const probe = spawnSync(name, ['-c', 'import sys;print("%d.%d" % sys.version_info[:2])'], {
       encoding: 'utf8',
     })
@@ -172,7 +184,19 @@ export function createInstaller(options) {
     if (!existsSync(pythonPath)) {
       if (uv) {
         push(`使用 uv 创建 venv：${uv}`)
-        await run(uv, ['venv', '--python', 'python3', '.venv'], repoDir, 'uv venv')
+        // uv 的 --python 取值跨平台不同：先试具体版本，再退到平台默认可执行名
+        const selectors = IS_WINDOWS ? ['3.12', 'python', 'python3'] : ['3.12', 'python3']
+        let created = false
+        for (const selector of selectors) {
+          try {
+            await run(uv, ['venv', '--python', selector, '.venv'], repoDir, `uv venv --python ${selector}`)
+            created = true
+            break
+          } catch (err) {
+            push(`--python ${selector} 不可用，继续尝试下一个`)
+          }
+        }
+        if (!created) await run(uv, ['venv', '.venv'], repoDir, 'uv venv')
       } else {
         push(`使用系统 Python 创建 venv：${systemPython}`)
         await run(systemPython, ['-m', 'venv', '.venv'], repoDir, 'python -m venv')
@@ -185,7 +209,7 @@ export function createInstaller(options) {
     if (uv) {
       await run(uv, ['pip', 'install', '-p', pythonPath, '-e', '.'], repoDir, 'uv pip install -e .')
     } else {
-      const pip = join(repoDir, '.venv', 'bin', 'pip')
+      const pip = join(repoDir, '.venv', IS_WINDOWS ? 'Scripts' : 'bin', IS_WINDOWS ? 'pip.exe' : 'pip')
       await run(pip, ['install', '--upgrade', 'pip'], repoDir, 'pip install --upgrade pip')
       await run(pip, ['install', '-e', '.'], repoDir, 'pip install -e .')
     }
