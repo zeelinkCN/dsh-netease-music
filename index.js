@@ -336,11 +336,54 @@ function createCache() {
 }
 
 /* ------------------------------------------------------------------ *
+ * 播放器状态上报的收敛（只保留工具需要的字段，避免客户端塞任意大对象）
+ * ------------------------------------------------------------------ */
+function sanitizePlayerState(input) {
+  const src = input && typeof input === 'object' ? input : {}
+  const current = src.current && typeof src.current === 'object' ? src.current : null
+  const pickTrack = (track) =>
+    track && typeof track === 'object'
+      ? {
+          id: Number(track.id) || null,
+          name: typeof track.name === 'string' ? track.name.slice(0, 200) : '',
+          artist: typeof track.artist === 'string' ? track.artist.slice(0, 200) : '',
+          album: typeof track.album === 'string' ? track.album.slice(0, 200) : '',
+          liked: !!track.liked,
+        }
+      : null
+  return {
+    current: pickTrack(current),
+    playing: !!src.playing,
+    loading: !!src.loading,
+    position: Number(src.position) || 0,
+    duration: Number(src.duration) || 0,
+    quality: typeof src.quality === 'string' ? src.quality.slice(0, 16) : '',
+    actualLevel: typeof src.actualLevel === 'string' ? src.actualLevel.slice(0, 16) : '',
+    queueLength: Number(src.queueLength) || 0,
+    queue: Array.isArray(src.queue) ? src.queue.slice(0, 20).map(pickTrack).filter(Boolean) : [],
+    contextTitle: typeof src.contextTitle === 'string' ? src.contextTitle.slice(0, 120) : '',
+    updatedAt: Date.now(),
+  }
+}
+
+/* ------------------------------------------------------------------ *
  * 插件入口
  * ------------------------------------------------------------------ */
 export function apply(ctx) {
   const cache = createCache()
   const bridge = new Bridge({ python: PYTHON, script: BRIDGE, cookieFile: COOKIE_FILE })
+  /* ---------------- 插件内播放器：Agent 命令队列 + 客户端上报状态 ---------------- */
+  const playerCommands = []
+  let playerCommandSeq = 0
+  let playerState = null
+  const pushPlayerCommand = (command) => {
+    playerCommandSeq += 1
+    playerCommands.push({ seq: playerCommandSeq, at: Date.now(), ...command })
+    if (playerCommands.length > 120) playerCommands.splice(0, playerCommands.length - 120)
+    return playerCommandSeq
+  }
+  const currentTrack = () => (playerState && playerState.current) || null
+
   const installer = createInstaller({
     engineDir: ENGINE_DIR,
     pythonPath: PYTHON,
@@ -544,6 +587,212 @@ export function apply(ctx) {
     res.end(bytes)
   }
 
+
+  /* ---------------- Agent 工具：在插件内播放（不启动桌面客户端） ---------------- */
+  const toolText = (text) => ({ schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] })
+
+  const formatTrack = (track) => `${track.name} - ${track.artist || '未知歌手'}`
+
+  /** 把一次「播放」请求解析成曲目列表 */
+  const resolvePlayRequest = async (args) => {
+    const seedId = currentTrack() && currentTrack().id ? currentTrack().id : undefined
+    if (args.mode) {
+      const data = await bridge.call('mode', { type: String(args.mode), seedSongId: seedId, limit: 30 }, { timeoutMs: 45_000 })
+      const songs = Array.isArray(data && data.songs) ? data.songs : []
+      return { songs, title: (data && data.title) || String(args.mode), subtitle: (data && data.subtitle) || '', fallbackUsed: (data && data.fallbackUsed) || null }
+    }
+    if (args.playlistId) {
+      const data = await bridge.call('playlist', { id: Number(args.playlistId) }, { timeoutMs: 60_000 })
+      const songs = Array.isArray(data && data.songs) ? data.songs : []
+      return { songs, title: (data && data.playlist && data.playlist.name) || '歌单', subtitle: '' }
+    }
+    if (args.albumId) {
+      const data = await bridge.call('album', { id: Number(args.albumId) }, { timeoutMs: 60_000 })
+      const songs = Array.isArray(data && data.songs) ? data.songs : []
+      return { songs, title: (data && data.album && data.album.name) || '专辑', subtitle: '' }
+    }
+    const query = String(args.query || '').trim()
+    if (query) {
+      const type = ['song', 'playlist', 'artist', 'album'].includes(String(args.type)) ? String(args.type) : 'song'
+      const limit = Math.min(50, Math.max(1, Number(args.limit) || 20))
+      const found = await bridge.call('search', { q: query, type, limit }, { timeoutMs: 30_000 })
+      const items = Array.isArray(found && found.items) ? found.items : []
+      if (!items.length) return { songs: [], title: query, subtitle: '', empty: true }
+      if (type === 'playlist') {
+        const detail = await bridge.call('playlist', { id: Number(items[0].id) }, { timeoutMs: 60_000 })
+        return { songs: (detail && detail.songs) || [], title: (detail && detail.playlist && detail.playlist.name) || query, subtitle: '' }
+      }
+      if (type === 'artist') {
+        const detail = await bridge.call('artist', { id: Number(items[0].id) }, { timeoutMs: 60_000 })
+        return { songs: (detail && detail.songs) || [], title: (detail && detail.artist && detail.artist.name) || query, subtitle: '' }
+      }
+      if (type === 'album') {
+        const detail = await bridge.call('album', { id: Number(items[0].id) }, { timeoutMs: 60_000 })
+        return { songs: (detail && detail.songs) || [], title: (detail && detail.album && detail.album.name) || query, subtitle: '' }
+      }
+      return { songs: items, title: '搜索：' + query, subtitle: '' }
+    }
+    const data = await bridge.call('daily', {}, { timeoutMs: 40_000 })
+    return { songs: (data && data.songs) || [], title: '每日推荐', subtitle: '' }
+  }
+
+  ctx.effect(() => {
+    const tools = ctx.get('tools')
+    const systemPrompt = ctx.get('systemPrompt')
+    const disposers = []
+
+    if (tools && typeof tools.register === 'function') {
+      disposers.push(tools.register({
+        name: 'netease_play',
+        description:
+          '在 DeepSeek Harness 的网易云音乐插件里开始播放（面板内播放器 + 底部播放条，不会启动或唤起桌面网易云客户端）。用户说“放首歌/听点音乐/来点周杰伦/播放我的歌单”时优先用本工具，而不是任何会打开桌面客户端的工具。可以用 query 搜索后播放、用 mode 播放推荐模式、用 playlistId/albumId 播放指定歌单/专辑，什么都不给则播放每日推荐。',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: { type: 'string', description: '搜索词，例如歌手、歌名、歌单名；与 mode/playlistId/albumId 互斥，优先 mode > playlistId > albumId > query。' },
+            type: { type: 'string', enum: ['song', 'playlist', 'artist', 'album'], description: 'query 的搜索类型，默认 song（播放搜索到的歌曲列表）；playlist/artist/album 会取第一个匹配项并播放其全部歌曲。' },
+            mode: { type: 'string', enum: ['daily', 'heart', 'roam', 'similar_song', 'similar_artist'], description: '听歌模式：daily 每日推荐；heart 心动模式；roam 私人漫游/FM；similar_song 相似歌曲；similar_artist 相似艺人。' },
+            playlistId: { type: 'integer', description: '网易云歌单 ID。' },
+            albumId: { type: 'integer', description: '网易云专辑 ID。' },
+            limit: { type: 'integer', description: '搜索歌曲时最多播放多少首（1-50，默认 20）。' },
+          },
+          additionalProperties: false,
+        },
+        output: toolText('播放结果'),
+        async execute(args) {
+          try {
+          const req = args && typeof args === 'object' ? args : {}
+          let resolved
+          try {
+            resolved = await resolvePlayRequest(req)
+          } catch (err) {
+            return '播放失败：' + String(err && err.message ? err.message : err)
+          }
+          const songs = Array.isArray(resolved.songs) ? resolved.songs : []
+          if (!songs.length) {
+            return resolved.empty
+              ? `没有搜到「${String(req.query || '')}」相关的歌，换一个关键词试试。`
+              : '没有拿到可播放的歌曲（可能是未登录或接口异常），请让用户在网易云插件面板检查登录状态。'
+          }
+          if (!installer.isInstalled() || !bridge.alive) {
+            return '播放器未就绪：数据引擎还没连接好，请让用户在网易云插件面板查看引擎状态。'
+          }
+          pushPlayerCommand({ type: 'playQueue', tracks: songs, title: resolved.title || '', subtitle: resolved.subtitle || '' })
+          const first = songs[0]
+          const fallback = resolved.fallbackUsed ? `（已降级：${resolved.fallbackUsed}）` : ''
+          return `${resolved.title || '播放'} · 共 ${songs.length} 首，已开始在 Harness 插件内播放：第一首《${formatTrack(first)}》${fallback}。播放条会固定在该面板底部，回到对话页后收进左侧栏迷你播放器，不影响继续工作。`
+          } catch (err) {
+            return '播放失败：' + String(err && err.message ? err.message : err)
+          }
+        },
+      }))
+
+      disposers.push(tools.register({
+        name: 'netease_player',
+        description:
+          '控制 Harness 内置网易云播放器的状态：查看当前播放、暂停/继续、上一首/下一首、跳转进度、调音量、收藏/取消收藏，也可以只搜索不播放。不要用它启动桌面网易云客户端；播放音乐请用 netease_play。',
+        parameters: {
+          type: 'object',
+          properties: {
+            action: { type: 'string', enum: ['status', 'pause', 'resume', 'next', 'prev', 'seek', 'volume', 'like', 'unlike', 'search'], description: '要执行的操作。status 查看当前播放；search 用 query 搜索并返回歌单文本（不播放）。' },
+            seconds: { type: 'number', description: 'action=seek 时的目标秒数。' },
+            volume: { type: 'number', description: 'action=volume 时的音量（0-1）。' },
+            trackId: { type: 'integer', description: 'action=like/unlike 时指定歌曲 ID；省略则用当前播放歌曲。' },
+            query: { type: 'string', description: 'action=search 的搜索词。' },
+            type: { type: 'string', enum: ['song', 'playlist', 'artist', 'album'], description: 'action=search 的搜索类型，默认 song。' },
+            limit: { type: 'integer', description: 'action=search 返回条数（1-20，默认 10）。' },
+          },
+          required: ['action'],
+          additionalProperties: false,
+        },
+        output: toolText('播放器状态'),
+        async execute(args) {
+          try {
+          const req = args && typeof args === 'object' ? args : {}
+          const action = String(req.action || 'status')
+          const state = playerState || { current: null, playing: false, position: 0, duration: 0 }
+          const nowPlaying = state.current ? `《${formatTrack(state.current)}》${state.playing ? '正在播放' : '已暂停'}` : '当前没有播放歌曲'
+          switch (action) {
+            case 'status': {
+              const auth = await bridge.call('status', {}, { timeoutMs: 15_000 }).catch(() => null)
+              const progress = state.duration ? `${Math.floor(state.position / 1000)}s / ${Math.floor(state.duration / 1000)}s` : ''
+              return `${nowPlaying}${progress ? '（' + progress + '）' : ''}；音质 ${state.actualLevel || state.quality || '自动'}；队列 ${state.queueLength || 0} 首；登录状态：${auth && auth.authed ? '已登录（' + (auth.nickname || '') + '）' : '未登录'}。${state.contextTitle ? '来源：' + state.contextTitle : ''}`
+            }
+            case 'pause':
+            case 'resume':
+            case 'next':
+            case 'prev':
+              pushPlayerCommand({ type: 'control', action })
+              return action === 'pause' ? '已发送暂停指令。' : action === 'resume' ? '已发送继续播放指令。' : action === 'next' ? '已切到下一首。' : '已切到上一首。'
+            case 'seek':
+              pushPlayerCommand({ type: 'control', action: 'seek', seconds: Number(req.seconds) || 0 })
+              return `已跳转到 ${Math.max(0, Number(req.seconds) || 0)} 秒。`
+            case 'volume':
+              pushPlayerCommand({ type: 'control', action: 'volume', volume: Math.min(1, Math.max(0, Number(req.volume))) })
+              return `音量已设为 ${Math.round(Math.min(1, Math.max(0, Number(req.volume))) * 100)}%。`
+            case 'like':
+            case 'unlike': {
+              const id = Number(req.trackId) || (state.current && state.current.id) || 0
+              if (!id) return '没有可收藏的歌曲：当前没有播放，也没有传 trackId。'
+              const data = await bridge.call('like_set', { id, like: action === 'like' }, { timeoutMs: 20_000 })
+              cache.clear()
+              pushPlayerCommand({ type: 'refreshLike', id, liked: action === 'like' })
+              return `${action === 'like' ? '已收藏到「我喜欢的音乐」' : '已取消收藏'}：歌曲 ${id}${data && data.liked !== undefined ? '（状态 ' + (data.liked ? '已收藏' : '未收藏') + '）' : ''}。`
+            }
+            case 'search': {
+              const found = await bridge.call('search', { q: String(req.query || ''), type: String(req.type || 'song'), limit: Math.min(20, Math.max(1, Number(req.limit) || 10)) }, { timeoutMs: 30_000 })
+              const items = Array.isArray(found && found.items) ? found.items : []
+              if (!items.length) return '没有搜到结果。'
+              const lines = items.slice(0, 20).map((item, index) => `${index + 1}. ${item.name}${item.artist ? ' - ' + item.artist : ''}${item.id ? ' (ID ' + item.id + ')' : ''}`)
+              return `搜索「${req.query}」：\n` + lines.join('\n')
+            }
+            default:
+              return '未知操作：' + action
+          }
+          } catch (err) {
+            return '播放器操作失败：' + String(err && err.message ? err.message : err)
+          }
+        },
+      }))
+
+      if (typeof tools.guard === 'function') {
+        disposers.push(tools.guard((exec) => {
+          const name = exec && typeof exec.name === 'string' ? exec.name : ''
+          if (/(^|__)cloud_music_play$/.test(name)) {
+            return '不要用 cloud_music_play 唤起桌面网易云客户端；用户想在 Harness 里边工作边听歌，请改用 netease_play 在本插件播放器内播放。'
+          }
+          if (/(^|__)cloud_music_login$/.test(name)) {
+            return '扫码登录请让用户在网易云音乐插件面板里点「扫码登录」，不要用 cloud_music_login（它会弹桌面图片窗口）。'
+          }
+          return undefined
+        }))
+      }
+    }
+
+    if (systemPrompt && typeof systemPrompt.section === 'function') {
+      disposers.push(systemPrompt.section({
+        name: 'netease-music-plugin',
+        order: 9000,
+        text: [
+          '## 音乐播放（网易云音乐插件）',
+          '用户在 Harness 里听歌时，使用插件工具：`netease_play` 开始播放（支持搜索词、听歌模式 daily/heart/roam/similar_song/similar_artist、歌单/专辑 ID），`netease_player` 查询状态或暂停/继续/切歌/跳转/调音量/收藏。',
+          '不要调用 `cloud_music_play`（会启动桌面网易云客户端）或 `cloud_music_login`（会弹桌面二维码窗口）；它们已被拦截。扫码登录请引导用户到左侧栏网易云面板操作。',
+          '播放不会中断对话：音乐在插件播放器里播放，面板内显示底部播放条，回到对话后收进左侧栏迷你播放器。',
+        ].join('\n'),
+      }))
+    }
+
+    return () => {
+      disposers.forEach((dispose) => {
+        try {
+          dispose()
+        } catch (err) {
+          log('工具释放失败', String(err?.message ?? err))
+        }
+      })
+    }
+  }, 'netease-music: agent tools')
+
   ctx.effect(() => {
     // 引擎缺失 → 自动无感安装（用户装完插件即可用，无需命令行）
     if (!installer.isInstalled()) {
@@ -560,6 +809,37 @@ export function apply(ctx) {
     }
 
     const routes = [
+      /* 插件内播放器：客户端轮询命令 + 上报播放状态（Agent 工具通过它驱动 UI） */
+      route(
+        'player/commands',
+        handle((url) => {
+          const raw = url.searchParams.get('cursor') ?? url.searchParams.get('since')
+          // 不带 cursor 的首次请求只取基线，避免刷新页面时重放历史命令
+          if (raw === null || raw === undefined || raw === '') return { cursor: playerCommandSeq, commands: [] }
+          const cursor = Number(raw) || 0
+          return {
+            cursor: playerCommandSeq,
+            commands: playerCommands.filter((cmd) => cmd.seq > cursor),
+          }
+        }),
+      ),
+      route(
+        'player/state',
+        handle(async (url, req, res) => {
+          if (req.method === 'POST') {
+            let body = {}
+            try {
+              body = await readJson(req)
+            } catch (err) {
+              throw err
+            }
+            playerState = sanitizePlayerState(body)
+            return { ok: true, at: Date.now() }
+          }
+          return playerState || { current: null, playing: false, position: 0, duration: 0, updatedAt: null }
+        }),
+      ),
+
       /* 运行状态：永远返回 200，方便前端区分「引擎缺失 / 未登录 / 就绪」 */
       route(
         'status',
