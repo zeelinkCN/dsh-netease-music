@@ -172,6 +172,24 @@ window.__ModuleLoader__.load({
       'dock.quality': '音质',
       'dock.expand': '展开播放页',
       'dock.collapse': '收起',
+      'hero.heart': '心动模式',
+      'hero.heartDesc': '围绕当前歌曲，为你心跳的旋律选歌',
+      'hero.roam': '漫游 · 私人FM',
+      'hero.roamDesc': '随机漫游，遇见下一首喜欢的歌',
+      'hero.similarSong': '相似歌曲',
+      'hero.similarSongDesc': '沿着这首歌，发现气质相近的好歌',
+      'hero.similarArtist': '相似艺人',
+      'hero.similarArtistDesc': '认识与这位歌手风格相近的音乐人',
+      'hero.daily': '每日推荐',
+      'hero.dailyDesc': '每天为你更新的专属 30 首',
+      'hero.play': '立即播放',
+      'hero.modeOf': '{index} / {total}',
+      'hero.prev': '上一个',
+      'hero.next': '下一个',
+      'hero.carouselLabel': '听歌模式',
+      'hero.retry': '重试',
+      'hero.fallback': '已降级：{reason}',
+      'toast.modeError': '暂时无法生成这个歌单，请稍后再试',
     }
     const EN = {
       'app.title': 'Netease Music',
@@ -335,6 +353,24 @@ window.__ModuleLoader__.load({
       'dock.quality': 'Quality',
       'dock.expand': 'Open Now Playing',
       'dock.collapse': 'Collapse',
+      'hero.heart': 'Heartbeat',
+      'hero.heartDesc': 'A mix tuned around the song you love',
+      'hero.roam': 'Roam · Private FM',
+      'hero.roamDesc': 'Wander and meet your next favorite song',
+      'hero.similarSong': 'Similar Songs',
+      'hero.similarSongDesc': 'Along this song, find kindred tracks',
+      'hero.similarArtist': 'Similar Artists',
+      'hero.similarArtistDesc': 'Meet artists with a kindred sound',
+      'hero.daily': 'Daily Mix',
+      'hero.dailyDesc': 'Thirty fresh picks for you every day',
+      'hero.play': 'Play now',
+      'hero.modeOf': '{index} / {total}',
+      'hero.prev': 'Previous',
+      'hero.next': 'Next',
+      'hero.carouselLabel': 'Listening modes',
+      'hero.retry': 'Retry',
+      'hero.fallback': 'Fallback: {reason}',
+      'toast.modeError': 'Could not build this mix, please try again',
     }
 
     /* ------------------------------------------------------------------ *
@@ -634,6 +670,11 @@ window.__ModuleLoader__.load({
       let lastVolume = 0.8
       let toastTimer = null
       let pendingResume = null
+      let pendingSeek = null
+      let pendingSeekRatio = null
+      let seekHoldCount = 0
+      let seekFallbackTimer = null
+      let seekRecoverTimer = null
       let urlRequestSeq = 0
       const audioHandlers = []
 
@@ -651,6 +692,8 @@ window.__ModuleLoader__.load({
         contextTitle: '',
         queueOpen: false,
         toast: null,
+        seeking: false,
+        seekTarget: null,
         quality: normalizeQuality(safeRead('netease-music:quality')),
         actualLevel: null,
         actualBr: 0,
@@ -759,6 +802,26 @@ window.__ModuleLoader__.load({
         if (isFinite(seconds) && seconds > 0) patch({ duration: Math.round(seconds * 1000) })
       }
 
+      function clearSeekTimers() {
+        if (seekFallbackTimer) {
+          clearTimeout(seekFallbackTimer)
+          seekFallbackTimer = null
+        }
+        if (seekRecoverTimer) {
+          clearTimeout(seekRecoverTimer)
+          seekRecoverTimer = null
+        }
+      }
+
+      function audioDurationSeconds() {
+        if (audio) {
+          const value = Number(audio.duration)
+          if (isFinite(value) && value > 0) return value
+        }
+        if (state.duration > 0) return state.duration / 1000
+        return 0
+      }
+
       function bindAudio(el) {
         if (!el) return
         unbindAudio()
@@ -772,6 +835,32 @@ window.__ModuleLoader__.load({
         }
         on('loadedmetadata', () => {
           syncDuration()
+          if (pendingSeekRatio != null && isFinite(audio.duration) && audio.duration > 0) {
+            const ratio = clamp(pendingSeekRatio, 0, 1)
+            pendingSeekRatio = null
+            clearSeekTimers()
+            const target = Math.min(ratio * audio.duration, Math.max(0, audio.duration - 0.2))
+            try {
+              audio.currentTime = target
+            } catch (err) {
+              /* ignore */
+            }
+            lastTimeEmit = Date.now()
+            patch({ position: Math.round(target * 1000), seeking: seekHoldCount > 0, seekTarget: target })
+          }
+          if (pendingSeek != null) {
+            const limit = isFinite(audio.duration) && audio.duration > 0 ? Math.max(0, audio.duration - 0.2) : pendingSeek
+            const target = Math.min(pendingSeek, limit)
+            pendingSeek = null
+            clearSeekTimers()
+            try {
+              audio.currentTime = target
+            } catch (err) {
+              /* ignore */
+            }
+            lastTimeEmit = Date.now()
+            patch({ position: Math.round(target * 1000), seeking: seekHoldCount > 0, seekTarget: null })
+          }
           if (!pendingResume) return
           const resume = pendingResume
           pendingResume = null
@@ -793,9 +882,25 @@ window.__ModuleLoader__.load({
           if (now - lastTimeEmit < 250) return
           lastTimeEmit = now
           const seconds = Number(audio.duration)
-          const next = { position: Math.round((audio.currentTime || 0) * 1000) }
+          const next = {}
           if (isFinite(seconds) && seconds > 0) next.duration = Math.round(seconds * 1000)
-          patch(next)
+          /* seeking 期间不能用旧 currentTime 覆盖 UI 进度，否则松手会跳回旧位置 */
+          if (!state.seeking) next.position = Math.round((audio.currentTime || 0) * 1000)
+          if (Object.keys(next).length) patch(next)
+        })
+        on('seeking', () => {
+          if (!state.seeking) patch({ seeking: true })
+        })
+        on('seeked', () => {
+          if (!audio) return
+          clearSeekTimers()
+          lastTimeEmit = Date.now()
+          patch({
+            seeking: seekHoldCount > 0,
+            seekTarget: null,
+            position: Math.round((audio.currentTime || 0) * 1000),
+            loading: false,
+          })
         })
         on('playing', () => {
           syncMediaState(true)
@@ -875,10 +980,15 @@ window.__ModuleLoader__.load({
           return
         }
         pendingResume = null
+        pendingSeek = null
+        pendingSeekRatio = null
+        clearSeekTimers()
         patch({
           current: track,
           loading: true,
           error: null,
+          seeking: false,
+          seekTarget: null,
           position: 0,
           duration: Number(track.duration) || 0,
           actualLevel: null,
@@ -922,6 +1032,7 @@ window.__ModuleLoader__.load({
           seconds: audio.currentTime || state.position / 1000 || 0,
           playing: shouldPlay,
         }
+        patch({ seeking: false, seekTarget: null })
         patch({ loading: true })
         refreshUrlInfo()
         try {
@@ -1042,22 +1153,103 @@ window.__ModuleLoader__.load({
 
       function seekSeconds(seconds) {
         if (!audio) return
-        const duration = state.duration || (isFinite(audio.duration) ? audio.duration * 1000 : 0)
-        if (!duration) return
-        const target = clamp(seconds, 0, duration)
-        try {
-          audio.currentTime = target / 1000
-        } catch (err) {
-          /* ignore */
+        const wanted = Math.max(0, Number(seconds) || 0)
+        const duration = audioDurationSeconds()
+        const metadataReady = audio.readyState >= 1 && isFinite(Number(audio.duration)) && Number(audio.duration) > 0
+        if (!duration || !metadataReady) {
+          /* 元数据未到：存 pendingSeek，loadedmetadata 时应用（不要在 readyState 0 上硬设） */
+          pendingSeekRatio = null
+          pendingSeek = wanted / 1000
+          patch({ seeking: true, seekTarget: pendingSeek })
+          return
         }
+        const target = clamp(wanted, 0, duration * 1000) / 1000
+        clearSeekTimers()
         lastTimeEmit = Date.now()
-        patch({ position: target })
+        patch({ seeking: true, seekTarget: target, position: Math.round(target * 1000) })
+        try {
+          audio.currentTime = target
+        } catch (err) {
+          /* 交给 seek 超时兜底 */
+        }
+        seekFallbackTimer = setTimeout(() => {
+          seekFallbackTimer = null
+          if (!audio || (!state.seeking && seekHoldCount === 0)) return
+          patch({
+            seeking: seekHoldCount > 0,
+            seekTarget: null,
+            position: Math.round((audio.currentTime || 0) * 1000),
+          })
+        }, 2500)
+        seekRecoverTimer = setTimeout(() => {
+          seekRecoverTimer = null
+          if (!audio || !state.seeking) return
+          const track = state.current
+          if (!track) return
+          pendingResume = { seconds: target, playing: state.playing }
+          try {
+            audio.src = buildAudioUrl(track.id, state.quality)
+            audio.load()
+            patch({ loading: true })
+          } catch (err) {
+            patch({ seeking: false, seekTarget: null })
+          }
+        }, 4000)
+      }
+
+      function beginSeekHold() {
+        seekHoldCount += 1
+        patch({ seeking: true })
+      }
+
+      function endSeekHold() {
+        seekHoldCount = Math.max(0, seekHoldCount - 1)
+        if (seekHoldCount > 0) return
+        clearSeekTimers()
+        lastTimeEmit = Date.now()
+        patch({
+          seeking: false,
+          seekTarget: null,
+          position: audio ? Math.round((audio.currentTime || 0) * 1000) : state.position,
+        })
       }
 
       function seekRatio(ratio) {
-        const duration = state.duration || (audio && isFinite(audio.duration) ? audio.duration * 1000 : 0)
-        if (!duration) return
-        seekSeconds(clamp(ratio, 0, 1) * duration)
+        const value = clamp(ratio, 0, 1)
+        const hasAudioDuration = !!audio && audio.readyState >= 1 && isFinite(Number(audio.duration)) && Number(audio.duration) > 0
+        if (hasAudioDuration) {
+          seekSeconds(value * Number(audio.duration) * 1000)
+          return
+        }
+        /* 元数据还没到：按比例记录，metadata 到达后用真实时长换算，避免用旧 track.duration 造成偏差 */
+        pendingSeek = null
+        pendingSeekRatio = value
+        patch({ seeking: true, seekTarget: null })
+        if (seekHoldCount === 0) {
+          clearSeekTimers()
+          seekFallbackTimer = setTimeout(() => {
+            seekFallbackTimer = null
+            if (!audio || (!state.seeking && seekHoldCount === 0)) return
+            patch({ seeking: seekHoldCount > 0, seekTarget: null, position: Math.round((audio.currentTime || 0) * 1000) })
+          }, 2500)
+          seekRecoverTimer = setTimeout(() => {
+            seekRecoverTimer = null
+            if (!audio || seekHoldCount > 0) return
+            const track = state.current
+            if (!track) return
+            pendingResume = {
+              seconds: (pendingSeekRatio != null ? pendingSeekRatio : 0) * (Number(audio.duration) || state.duration / 1000 || 0),
+              playing: state.playing,
+            }
+            try {
+              audio.src = buildAudioUrl(track.id, state.quality)
+              audio.load()
+              patch({ loading: true })
+            } catch (err) {
+              patch({ seeking: false, seekTarget: null })
+            }
+          }, 4000)
+        }
       }
 
       function setVolume(value) {
@@ -1117,9 +1309,13 @@ window.__ModuleLoader__.load({
         disposed = true
         if (toastTimer) clearTimeout(toastTimer)
         toastTimer = null
+        clearSeekTimers()
+        pendingSeek = null
+        pendingSeekRatio = null
+        seekHoldCount = 0
         unbindAudio()
         listeners.clear()
-        state = Object.assign({}, state, { current: null, queue: [], index: -1, playing: false, loading: false, error: null, queueOpen: false, toast: null })
+        state = Object.assign({}, state, { current: null, queue: [], index: -1, playing: false, loading: false, error: null, queueOpen: false, toast: null, seeking: false, seekTarget: null })
       }
 
       return {
@@ -1135,6 +1331,8 @@ window.__ModuleLoader__.load({
         jump,
         seekSeconds,
         seekRatio,
+        beginSeekHold,
+        endSeekHold,
         setVolume,
         toggleMute,
         setQueueOpen,
@@ -1423,6 +1621,26 @@ window.__ModuleLoader__.load({
     function enterNowPlayingFromDock() {
       openPanel()
       openNowPlaying()
+    }
+
+    /* 全局 pointerup 派发：进度条在元素外松开也能提交最终位置 */
+    const seekPointerHandlers = new Set()
+
+    function notifySeekPointerUp() {
+      Array.from(seekPointerHandlers).forEach((fn) => {
+        try {
+          fn()
+        } catch (err) {
+          /* ignore */
+        }
+      })
+    }
+
+    function useSeekPointerGuard(handler) {
+      React.useEffect(() => {
+        seekPointerHandlers.add(handler)
+        return () => seekPointerHandlers.delete(handler)
+      }, [handler])
     }
 
     /* ------------------------------------------------------------------ *
@@ -1833,40 +2051,333 @@ window.__ModuleLoader__.load({
             }, failed ? t('engine.retryInstall') : t('engine.install'))))
     }
 
-    function Hero(props) {
+    const HERO_MODES = [
+      { key: 'heart', title: 'hero.heart', desc: 'hero.heartDesc' },
+      { key: 'roam', title: 'hero.roam', desc: 'hero.roamDesc' },
+      { key: 'similar_song', title: 'hero.similarSong', desc: 'hero.similarSongDesc' },
+      { key: 'similar_artist', title: 'hero.similarArtist', desc: 'hero.similarArtistDesc' },
+      { key: 'daily', title: 'hero.daily', desc: 'hero.dailyDesc' },
+    ]
+
+    function HeroCarousel(props) {
       const t = props.t
-      const songs = toArray(props.tracks)
+      const currentSong = usePlayerSelector((snapshot) => snapshot.current)
+      const daily = toArray(props.daily)
+      const total = HERO_MODES.length
+      const [pos, setPos] = React.useState(1)
+      const [noTransition, setNoTransition] = React.useState(false)
+      const [hover, setHover] = React.useState(false)
+      const [dragging, setDragging] = React.useState(false)
+      const [dragX, setDragX] = React.useState(0)
+      const [pending, setPending] = React.useState('')
+      const [modeMeta, setModeMeta] = React.useState({})
+      const dragRef = React.useRef({ active: false, startX: 0, dx: 0, moved: false })
+      const suppressRef = React.useRef(false)
+      const suppressTimer = React.useRef(null)
+      const animatingRef = React.useRef(false)
+      const animTimer = React.useRef(null)
+      const posRef = React.useRef(pos)
+      posRef.current = pos
+      const trackRef = React.useRef(null)
+      const realIndex = ((pos - 1) % total + total) % total
+
+      const clearAnimTimer = () => {
+        if (animTimer.current) {
+          clearTimeout(animTimer.current)
+          animTimer.current = null
+        }
+      }
+
+      /* 到克隆端点后：关 transition 瞬间归位，再恢复，形成无缝无限轮播 */
+      const snapIfEdge = () => {
+        const current = posRef.current
+        if (current === 0 || current === total + 1) {
+          setNoTransition(true)
+          setPos(current === 0 ? total : 1)
+        }
+        animatingRef.current = false
+        clearAnimTimer()
+      }
+
+      React.useEffect(() => () => {
+        if (suppressTimer.current) clearTimeout(suppressTimer.current)
+        clearAnimTimer()
+      }, [])
+
+      React.useEffect(() => {
+        if (!noTransition) return undefined
+        let second = 0
+        const first = requestAnimationFrame(() => {
+          second = requestAnimationFrame(() => setNoTransition(false))
+        })
+        return () => {
+          cancelAnimationFrame(first)
+          if (second) cancelAnimationFrame(second)
+        }
+      }, [noTransition])
+
+      React.useEffect(() => {
+        if (hover || dragging || props.loading) return undefined
+        const timer = setTimeout(() => step(1), 6000)
+        return () => clearTimeout(timer)
+      }, [hover, dragging, props.loading, pos])
+
+      const go = (delta) => {
+        step(delta)
+      }
+
+      const step = (delta) => {
+        if (animatingRef.current) return
+        animatingRef.current = true
+        clearAnimTimer()
+        setPos((value) => {
+          const next = value + delta
+          if (next < 0 || next > total + 1) return value
+          return next
+        })
+        animTimer.current = setTimeout(() => {
+          if (!animatingRef.current) return
+          snapIfEdge()
+        }, 520)
+      }
+
+      const jumpTo = (index) => {
+        if (animatingRef.current) return
+        animatingRef.current = true
+        clearAnimTimer()
+        setPos(index + 1)
+        animTimer.current = setTimeout(() => {
+          animatingRef.current = false
+          clearAnimTimer()
+        }, 460)
+      }
+
+      const onTrackTransitionEnd = (event) => {
+        if (!event || event.target !== trackRef.current) return
+        if (event.propertyName && event.propertyName !== 'transform') return
+        if (!animatingRef.current) return
+        const current = posRef.current
+        if (current === 0 || current === total + 1) snapIfEdge()
+        else {
+          animatingRef.current = false
+          clearAnimTimer()
+        }
+      }
+
       const covers = []
-      songs.forEach((song) => {
+      daily.forEach((song) => {
         const cover = httpsUrl(song && song.cover)
-        if (cover && covers.length < 4) covers.push(cover)
+        if (cover && covers.length < 8) covers.push(cover)
       })
-      while (covers.length < 4) covers.push(null)
-      const count = songs.length
-      const dateLabel = fmtToday(t('fmt.locale'))
-      return h('section', { className: cx('nm-hero', props.loading && 'is-loading'), 'data-nm': 'hero' },
-        h('div', { className: 'nm-hero-copy' },
-          h('div', { className: 'nm-eyebrow' },
-            h('span', { className: 'nm-eyebrow-dot' }),
-            t('hero.eyebrow', { date: dateLabel })),
-          h('h1', { className: 'nm-hero-title' }, t('hero.title')),
-          h('p', { className: 'nm-hero-desc' }, count ? t('hero.desc', { n: count }) : t('hero.descEmpty')),
-          h('div', { className: 'nm-hero-actions' },
-            h('button', {
-              type: 'button',
-              className: 'nm-btn accent lg',
-              'data-nm': 'play-all',
-              disabled: !!props.loading || !count,
-              onClick: props.onPlayAll,
-              title: t('action.playAll'),
-            }, h(Icon, { name: 'play', size: 16 }), t('action.playAll')),
-            count ? h('span', { className: 'nm-hero-count' }, t('hero.count', { n: count })) : null)),
-        h('div', { className: 'nm-hero-art', 'aria-hidden': 'true' },
-          h('div', { className: 'nm-hero-stack' },
-            covers.map((src, index) => h('div', { key: index, className: 'nm-hero-cell c' + (index + 1) },
-              src
-                ? h('img', { src, alt: '', loading: 'eager', draggable: false })
-                : h('div', { className: 'nm-hero-cell-ph' }, h(Icon, { name: 'note', size: 22 })))))))
+
+      const seedSong = currentSong || daily[0] || null
+      const seedSongId = seedSong && seedSong.id != null ? String(seedSong.id) : ''
+      let seedArtistId = ''
+      if (seedSong) {
+        if (Array.isArray(seedSong.artists) && seedSong.artists.length && seedSong.artists[0] && seedSong.artists[0].id != null) {
+          seedArtistId = String(seedSong.artists[0].id)
+        } else if (seedSong.artistId != null) {
+          seedArtistId = String(seedSong.artistId)
+        }
+      }
+
+      const playMode = (mode) => {
+        if (pending || suppressRef.current) return
+        setPending(mode.key)
+        const params = { type: mode.key, limit: 50 }
+        if (mode.key !== 'daily') {
+          if (seedSongId) params.songId = seedSongId
+          if (seedArtistId) params.artistId = seedArtistId
+        }
+        apiGet('/mode?' + qs(params)).then((data) => {
+          const songs = toArray(data && data.songs)
+          if (!songs.length) {
+            const message = (data && data.error) || t('toast.modeError')
+            setModeMeta((prev) => Object.assign({}, prev, {
+              [mode.key]: { title: t(mode.title), subtitle: t(mode.desc), error: message, fallbackUsed: '' },
+            }))
+            if (props.onToast) props.onToast(message)
+            return
+          }
+          setModeMeta((prev) => Object.assign({}, prev, {
+            [mode.key]: {
+              title: (data && data.title) || t(mode.title),
+              subtitle: (data && data.subtitle) || t(mode.desc),
+              fallbackUsed: (data && data.fallbackUsed) || '',
+              error: '',
+            },
+          }))
+          player.playQueue(songs, 0, (data && data.title) || t(mode.title))
+        }).catch((err) => {
+          const message = (err && err.message) || t('toast.modeError')
+          setModeMeta((prev) => Object.assign({}, prev, {
+            [mode.key]: { title: t(mode.title), subtitle: t(mode.desc), error: message, fallbackUsed: '' },
+          }))
+          if (props.onToast) props.onToast(message)
+        }).then(() => setPending(''))
+      }
+
+      const playAll = () => {
+        if (props.loading || !daily.length) return
+        player.playQueue(daily, 0, t('section.daily'))
+      }
+
+      const onTrackPointerDown = (event) => {
+        if (event.button !== undefined && event.button !== 0) return
+        dragRef.current = { active: true, startX: event.clientX, dx: 0, moved: false }
+        setDragging(true)
+        try {
+          event.currentTarget.setPointerCapture(event.pointerId)
+        } catch (err) {
+          /* ignore */
+        }
+      }
+
+      const onTrackPointerMove = (event) => {
+        const state = dragRef.current
+        if (!state.active) return
+        const dx = event.clientX - state.startX
+        state.dx = dx
+        if (Math.abs(dx) > 8) state.moved = true
+        setDragX(dx)
+      }
+
+      const finishDrag = (event) => {
+        const state = dragRef.current
+        if (!state.active) return
+        state.active = false
+        const dx = event && event.clientX !== undefined ? event.clientX - state.startX : state.dx
+        if (state.moved && Math.abs(dx) > 40) {
+          go(dx < 0 ? 1 : -1)
+          suppressRef.current = true
+          if (suppressTimer.current) clearTimeout(suppressTimer.current)
+          suppressTimer.current = setTimeout(() => {
+            suppressRef.current = false
+          }, 60)
+        }
+        setDragging(false)
+        setDragX(0)
+      }
+
+      const renderCard = (mode, modeIndex, clone, key) => {
+        const meta = modeMeta[mode.key] || {}
+        return h('article', {
+        key,
+        className: cx('nm-carousel-card', clone && 'is-clone'),
+        'data-nm': 'carousel-card',
+        'data-mode': mode.key,
+        'data-clone': clone ? 'true' : undefined,
+        'aria-hidden': clone ? 'true' : undefined,
+        role: clone ? undefined : 'button',
+        tabIndex: clone ? -1 : 0,
+        'aria-label': copyLabel(t, mode),
+        onClick: () => {
+          if (suppressRef.current) return
+          playMode(mode)
+        },
+        onKeyDown: (event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault()
+            if (!suppressRef.current) playMode(mode)
+          }
+        },
+      },
+      h('div', { className: 'nm-carousel-bg', 'aria-hidden': 'true' }),
+      h('div', { className: 'nm-carousel-shade', 'aria-hidden': 'true' }),
+      h('div', { className: 'nm-carousel-collage', 'aria-hidden': 'true' },
+        h('span', { className: 'nm-carousel-index' }, t('hero.modeOf', { index: modeIndex + 1, total })),
+        [0, 1, 2, 3].map((slot) => {
+          const src = covers.length ? covers[(modeIndex * 2 + slot) % covers.length] : null
+          return h('span', { key: slot, className: 'nm-carousel-cover c' + (slot + 1) },
+            src ? h('img', { src, alt: '', loading: modeIndex === realIndex ? 'eager' : 'lazy', draggable: false })
+              : h('span', { className: 'nm-carousel-cover-ph' }, h(Icon, { name: 'note', size: 18 })))
+        })),
+      h('div', { className: 'nm-carousel-copy' },
+        h('div', { className: 'nm-carousel-eyebrow' }, t('hero.carouselLabel')),
+        h('h2', { className: 'nm-carousel-title' }, meta.title || t(mode.title)),
+        h('p', { className: 'nm-carousel-desc' }, meta.error || meta.subtitle || t(mode.desc)),
+        meta.fallbackUsed ? h('p', { className: 'nm-carousel-fallback' }, t('hero.fallback', { reason: meta.fallbackUsed })) : null,
+        h('span', { className: 'nm-carousel-cta' },
+          pending === mode.key ? h(Spinner) : h(Icon, { name: 'play', size: 13 }),
+          pending === mode.key ? t('state.loading') : (meta.error ? t('hero.retry') : t('hero.play')))))
+      }
+
+      const slides = [
+        { mode: HERO_MODES[total - 1], modeIndex: total - 1, clone: true, key: 'clone-last' },
+      ]
+      HERO_MODES.forEach((mode, index) => slides.push({ mode, modeIndex: index, clone: false, key: mode.key }))
+      slides.push({ mode: HERO_MODES[0], modeIndex: 0, clone: true, key: 'clone-first' })
+
+      return h('section', { className: 'nm-hero-carousel', 'data-nm': 'hero' },
+        h('div', { className: 'nm-carousel-head' },
+          h('div', { className: 'nm-carousel-heading-wrap' },
+            h('div', { className: 'nm-eyebrow' },
+              h('span', { className: 'nm-eyebrow-dot' }),
+              t('hero.eyebrow', { date: fmtToday(t('fmt.locale')) })),
+            h('h1', { className: 'nm-carousel-heading' }, t('hero.title'))),
+          h('button', {
+            type: 'button',
+            className: 'nm-btn accent',
+            'data-nm': 'play-all',
+            disabled: !!props.loading || !daily.length,
+            onClick: playAll,
+            title: t('action.playAll'),
+          }, h(Icon, { name: 'play', size: 14 }), t('action.playAll'))),
+        h('div', {
+          className: 'nm-carousel',
+          'data-nm': 'hero-carousel',
+          'aria-roledescription': 'carousel',
+          'aria-label': t('hero.carouselLabel'),
+          onMouseEnter: () => setHover(true),
+          onMouseLeave: () => setHover(false),
+        },
+        h('div', {
+          ref: trackRef,
+          className: 'nm-carousel-track',
+          'data-pos': String(pos),
+          style: {
+            transform: 'translate3d(calc(' + (-pos * 100) + '% + ' + dragX + 'px), 0, 0)',
+            transition: noTransition || dragging ? 'none' : 'transform 360ms cubic-bezier(.22,.61,.36,1)',
+          },
+          onPointerDown: onTrackPointerDown,
+          onPointerMove: onTrackPointerMove,
+          onPointerUp: finishDrag,
+          onPointerCancel: finishDrag,
+          onTransitionEnd: onTrackTransitionEnd,
+        },
+        slides.map((slide) => renderCard(slide.mode, slide.modeIndex, slide.clone, slide.key))),
+        h('button', {
+          type: 'button',
+          className: 'nm-carousel-arrow is-prev',
+          'data-nm': 'carousel-prev',
+          'aria-label': t('hero.prev'),
+          title: t('hero.prev'),
+          onClick: () => go(-1),
+        }, h(Icon, { name: 'back', size: 17 })),
+        h('button', {
+          type: 'button',
+          className: 'nm-carousel-arrow is-next',
+          'data-nm': 'carousel-next',
+          'aria-label': t('hero.next'),
+          title: t('hero.next'),
+          onClick: () => go(1),
+        }, h(Icon, { name: 'right', size: 17 })),
+        h('div', { className: 'nm-carousel-dots', role: 'tablist', 'aria-label': t('hero.carouselLabel') },
+          HERO_MODES.map((mode, dotIndex) => h('button', {
+            key: mode.key,
+            type: 'button',
+            role: 'tab',
+            'aria-selected': dotIndex === realIndex ? 'true' : 'false',
+            className: cx('nm-carousel-dot', dotIndex === realIndex && 'is-active'),
+            'data-nm': 'carousel-dot',
+            'data-index': dotIndex,
+            'aria-label': t(mode.title),
+            onClick: () => jumpTo(dotIndex),
+          })))))
+    }
+
+    function copyLabel(t, mode) {
+      return t(mode.title) + ' · ' + t('hero.play')
     }
 
     function LoginBanner(props) {
@@ -2341,20 +2852,49 @@ window.__ModuleLoader__.load({
      * ------------------------------------------------------------------ */
     function Slider(props) {
       const [drag, setDrag] = React.useState(null)
+      const dragRef = React.useRef(null)
+      const lastRatioRef = React.useRef(0)
+      const lastCommitRef = React.useRef(0)
       const railRef = React.useRef(null)
+      const onCommitRef = React.useRef(props.onCommit)
+      onCommitRef.current = props.onCommit
+      const disabledRef = React.useRef(props.disabled)
+      disabledRef.current = props.disabled
+      const holdSeekRef = React.useRef(!!props.holdSeek)
+      holdSeekRef.current = !!props.holdSeek
       const value = clamp(props.value === undefined ? 0 : props.value, 0, 1)
       const shown = drag === null ? value : drag
+
       const ratioFrom = (event) => {
         const node = railRef.current
-        if (!node) return shown
+        if (!node) return lastRatioRef.current
         const rect = node.getBoundingClientRect()
-        if (!rect || !rect.width) return shown
+        if (!rect || !rect.width) return lastRatioRef.current
         return clamp((event.clientX - rect.left) / rect.width, 0, 1)
       }
+
       const commit = (ratio) => {
-        if (props.disabled) return
-        if (typeof props.onCommit === 'function') props.onCommit(clamp(ratio, 0, 1))
+        if (disabledRef.current) return
+        if (typeof onCommitRef.current === 'function') onCommitRef.current(clamp(ratio, 0, 1))
       }
+
+      /* 全局 pointerup 兜底：指针移出进度条/在窗口外松开时也要提交 */
+      useSeekPointerGuard(() => {
+        if (dragRef.current === null) return
+        const ratio = lastRatioRef.current
+        dragRef.current = null
+        setDrag(null)
+        if (holdSeekRef.current) player.endSeekHold()
+        if (disabledRef.current) return
+        if (typeof onCommitRef.current === 'function') onCommitRef.current(ratio)
+      })
+
+      /* 组件在拖动中被卸载（例如关闭播放页）时释放 seeking 状态 */
+      React.useEffect(() => () => {
+        if (dragRef.current !== null && holdSeekRef.current) player.endSeekHold()
+        dragRef.current = null
+      }, [])
+
       const onPointerDown = (event) => {
         if (props.disabled) return
         if (event.button !== undefined && event.button !== 0) return
@@ -2367,18 +2907,38 @@ window.__ModuleLoader__.load({
             /* ignore */
           }
         }
-        setDrag(ratioFrom(event))
-      }
-      const onPointerMove = (event) => {
-        if (drag === null || props.disabled) return
-        setDrag(ratioFrom(event))
-      }
-      const onPointerUp = (event) => {
-        if (drag === null) return
         const ratio = ratioFrom(event)
-        setDrag(null)
+        dragRef.current = ratio
+        lastRatioRef.current = ratio
+        lastCommitRef.current = Date.now()
+        setDrag(ratio)
+        if (props.holdSeek) player.beginSeekHold()
+        /* 按下立即 seek：点进度条任意位置立刻跳过去 */
         commit(ratio)
       }
+
+      const onPointerMove = (event) => {
+        if (dragRef.current === null || props.disabled) return
+        const ratio = ratioFrom(event)
+        lastRatioRef.current = ratio
+        setDrag(ratio)
+        const now = Date.now()
+        /* 拖动中 120ms 节流提交，避免每帧都 seek */
+        if (now - lastCommitRef.current >= 120) {
+          lastCommitRef.current = now
+          commit(ratio)
+        }
+      }
+
+      const onPointerUp = (event) => {
+        if (dragRef.current === null) return
+        const ratio = ratioFrom(event)
+        dragRef.current = null
+        setDrag(null)
+        if (props.holdSeek) player.endSeekHold()
+        commit(ratio)
+      }
+
       const onKeyDown = (event) => {
         if (props.disabled) return
         let next = null
@@ -2390,6 +2950,7 @@ window.__ModuleLoader__.load({
         event.preventDefault()
         commit(next)
       }
+
       return h('div', {
         className: cx('nm-slider', props.className, drag !== null && 'is-dragging'),
         role: 'slider',
@@ -2402,7 +2963,11 @@ window.__ModuleLoader__.load({
         onPointerDown,
         onPointerMove,
         onPointerUp,
-        onPointerCancel: () => setDrag(null),
+        onPointerCancel: () => {
+          if (dragRef.current !== null && props.holdSeek) player.endSeekHold()
+          dragRef.current = null
+          setDrag(null)
+        },
         onKeyDown,
       },
       h('div', { className: 'nm-slider-rail', ref: railRef },
@@ -2414,12 +2979,17 @@ window.__ModuleLoader__.load({
       const t = props.t
       const duration = props.duration || 0
       const position = duration ? Math.min(props.position || 0, duration) : props.position || 0
-      return h('div', { className: 'nm-progress-wrap', 'data-nm': 'player-progress' },
+      return h('div', {
+        className: 'nm-progress-wrap',
+        'data-nm': 'player-progress',
+        'data-seeking': props.seeking ? 'true' : 'false',
+      },
         h('span', { className: 'nm-progress-time' }, fmtTime(position)),
         h(Slider, {
           value: duration ? position / duration : 0,
           label: t('player.progress'),
           valueText: fmtTime(position) + ' / ' + fmtTime(duration),
+          holdSeek: true,
           onCommit: (ratio) => player.seekRatio(ratio),
         }),
         h('span', { className: 'nm-progress-time is-right' }, fmtTime(duration)))
@@ -2610,7 +3180,7 @@ window.__ModuleLoader__.load({
                 h('span', { className: 'nm-dock-error-text' }, t('player.error')),
                 h('button', { type: 'button', className: 'nm-link-btn', onClick: () => player.retryCurrent() }, t('player.retry')),
                 h('button', { type: 'button', className: 'nm-link-btn', onClick: () => player.next(false) }, t('player.skip')))
-              : h(PlayerProgress, { t, position: snapshot.position, duration })),
+              : h(PlayerProgress, { t, position: snapshot.position, duration, seeking: snapshot.seeking })),
         h('div', { className: 'nm-dock-right' },
           collapsed
             ? null
@@ -2822,42 +3392,6 @@ window.__ModuleLoader__.load({
         h('div', { className: 'nm-np-sub' }, trackArtists(track) || ''),
         track.album ? h('div', { className: 'nm-np-album' }, t('np.album') + ' · ' + track.album) : null)
 
-      const controlsBlock = (compact) => h('div', { className: cx('nm-np-controls', compact && 'is-compact') },
-        h('button', {
-          type: 'button',
-          className: 'nm-icon-btn nm-np-ctrl',
-          title: t('action.prev'),
-          'aria-label': t('action.prev'),
-          'data-nm': 'np-prev',
-          onClick: () => player.prev(),
-        }, h(Icon, { name: 'prev', size: compact ? 16 : 20 })),
-        h('button', {
-          type: 'button',
-          className: cx('nm-np-play', compact && 'is-compact', snapshot.loading && 'is-loading'),
-          title: toggleLabel,
-          'aria-label': toggleLabel,
-          'data-nm': 'np-play',
-          onClick: () => player.toggle(),
-        }, snapshot.loading && !playing ? h(Spinner) : h(Icon, { name: playing ? 'pause' : 'play', size: compact ? 17 : 22 })),
-        h('button', {
-          type: 'button',
-          className: 'nm-icon-btn nm-np-ctrl',
-          title: t('action.next'),
-          'aria-label': t('action.next'),
-          'data-nm': 'np-next',
-          onClick: () => player.next(false),
-        }, h(Icon, { name: 'next', size: compact ? 16 : 20 })))
-
-      const progressBlock = h('div', { className: 'nm-np-progress' },
-        h('span', { className: 'nm-progress-time' }, fmtTime(position)),
-        h(Slider, {
-          value: duration ? Math.min(position, duration) / duration : 0,
-          label: t('player.progress'),
-          valueText: fmtTime(position) + ' / ' + fmtTime(duration),
-          onCommit: (ratio) => player.seekRatio(ratio),
-        }),
-        h('span', { className: 'nm-progress-time is-right' }, fmtTime(duration)))
-
       const topBar = h('div', { className: 'nm-np-top' },
         h('button', {
           ref: backRef,
@@ -2931,38 +3465,18 @@ window.__ModuleLoader__.load({
                 }
               },
             }, h(Vinyl, { track, playing })),
-            metaBlock,
-            controlsBlock(false),
-            progressBlock,
-            h('div', { className: 'nm-np-tools' },
-              h('button', {
-                type: 'button',
-                className: 'nm-icon-btn',
-                title: snapshot.muted ? t('action.unmute') : t('action.mute'),
-                'aria-label': snapshot.muted ? t('action.unmute') : t('action.mute'),
-                onClick: () => player.toggleMute(),
-              }, h(Icon, { name: snapshot.muted ? 'mute' : 'volume', size: 16 })),
-              h(Slider, {
-                value: snapshot.muted ? 0 : snapshot.volume,
-                step: 0.05,
-                label: t('np.volume'),
-                className: 'nm-np-volume',
-                onCommit: (ratio) => player.setVolume(ratio),
-              }),
-              h('span', { className: 'nm-np-quality-hint' }, qualityText))))
+            metaBlock))
         : h('div', { className: 'nm-np-stage is-lyrics', 'data-nm': 'np-mode', 'data-mode': 'lyrics' },
           h('div', { className: 'nm-np-lyrics-head' },
             h('span', { className: 'nm-np-lyrics-title' }, t('np.lyrics')),
             parsed.translated ? h('span', { className: 'nm-np-lyrics-badge' }, t('np.translated')) : null),
-          h('div', { className: 'nm-np-lyrics', 'data-nm': 'np-lyrics', ref: scrollRef }, lyricsBody),
-          h('div', { className: 'nm-np-lyrics-bar' },
-            progressBlock,
-            controlsBlock(true)))
+          h('div', { className: 'nm-np-lyrics', 'data-nm': 'np-lyrics', ref: scrollRef }, lyricsBody))
 
       return h('div', {
         className: 'nm-np',
         'data-nm': 'nowplaying',
         'data-mode': mode,
+        'data-playing': playing ? 'true' : 'false',
       },
       h('div', {
         className: 'nm-np-bg',
@@ -3414,11 +3928,11 @@ window.__ModuleLoader__.load({
           })))))
 
       const renderRecommend = () => h(React.Fragment, null,
-        h(Hero, {
+        h(HeroCarousel, {
           t,
-          tracks: dailySongs,
+          daily: dailySongs,
           loading: home.loading && !home.data,
-          onPlayAll: playDaily,
+          onToast: setToast,
         }),
         home.error && !engineBroken && !engineInstalling
           ? h('div', { className: 'nm-section' },
@@ -3913,6 +4427,85 @@ window.__ModuleLoader__.load({
     .nm-hero:hover .nm-hero-cell.c3{transform:rotate(5.5deg) translateY(2px)}
     .nm-hero:hover .nm-hero-cell.c4{transform:rotate(-5.5deg) translateY(3px)}
 
+    /* ---------- 首页听歌模式轮播 ---------- */
+    .nm-hero-carousel{margin-top:22px;animation:nm-fade .4s ease both}
+    .nm-carousel-head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:14px}
+    .nm-carousel-heading-wrap{min-width:0}
+    .nm-carousel-heading{margin:6px 0 0;font-size:clamp(24px,2.6vw,34px);line-height:1.08;font-weight:750;letter-spacing:-.03em}
+    .nm-carousel{position:relative;border-radius:26px;overflow:hidden;border:1px solid var(--nm-line);
+      background:var(--nm-l1);box-shadow:var(--nm-shadow-card);isolation:isolate}
+    .nm-carousel-track{display:flex;transition:transform 460ms cubic-bezier(.2,.7,.3,1);will-change:transform;
+      touch-action:pan-y;cursor:grab}
+    .nm-carousel-track:active{cursor:grabbing}
+    .nm-carousel-card{position:relative;flex:0 0 100%;min-height:286px;display:flex;align-items:center;
+      padding:30px 34px 30px 76px;overflow:hidden;cursor:pointer;user-select:none;outline:none}
+    .nm-carousel-card.is-clone{pointer-events:none}
+    .nm-carousel-bg{position:absolute;inset:0;z-index:0;
+      background:
+        radial-gradient(120% 150% at 0% 0%,color-mix(in srgb,var(--nm-accent) 28%,transparent),transparent 62%),
+        linear-gradient(120deg,color-mix(in srgb,var(--nm-accent) 14%,var(--nm-l2)),var(--nm-l1) 70%);}
+    .nm-carousel-card[data-mode="heart"] .nm-carousel-bg{
+      background:
+        radial-gradient(130% 150% at 0% 0%,color-mix(in srgb,var(--nm-accent) 40%,transparent),transparent 64%),
+        linear-gradient(120deg,color-mix(in srgb,var(--nm-accent) 24%,var(--nm-l2)),var(--nm-l1) 72%);}
+    .nm-carousel-card[data-mode="roam"] .nm-carousel-bg{
+      background:
+        radial-gradient(120% 160% at 4% 0%,color-mix(in srgb,var(--nm-accent-2) 36%,transparent),transparent 62%),
+        linear-gradient(115deg,color-mix(in srgb,var(--nm-accent-2) 20%,var(--nm-l2)),var(--nm-l1) 74%);}
+    .nm-carousel-card[data-mode="similar_song"] .nm-carousel-bg{
+      background:
+        radial-gradient(120% 150% at 0% 4%,color-mix(in srgb,var(--nm-accent) 26%,var(--nm-success) 12%,transparent),transparent 64%),
+        linear-gradient(120deg,color-mix(in srgb,var(--nm-accent) 15%,var(--nm-l2)),var(--nm-l1) 72%);}
+    .nm-carousel-card[data-mode="similar_artist"] .nm-carousel-bg{
+      background:
+        radial-gradient(120% 150% at 0% 0%,color-mix(in srgb,var(--nm-accent-2) 28%,var(--nm-accent) 12%,transparent),transparent 66%),
+        linear-gradient(125deg,color-mix(in srgb,var(--nm-accent-2) 14%,var(--nm-l2)),var(--nm-l1) 74%);}
+    .nm-carousel-card[data-mode="daily"] .nm-carousel-bg{
+      background:
+        radial-gradient(130% 150% at 2% 0%,color-mix(in srgb,var(--nm-accent) 30%,transparent),transparent 60%),
+        radial-gradient(90% 120% at 100% 100%,color-mix(in srgb,var(--nm-accent-2) 22%,transparent),transparent 60%),
+        linear-gradient(120deg,color-mix(in srgb,var(--nm-accent) 12%,var(--nm-l2)),var(--nm-l1) 70%);}
+    .nm-carousel-shade{position:absolute;inset:0;z-index:1;pointer-events:none;
+      background:linear-gradient(90deg,color-mix(in srgb,var(--nm-bg) 56%,transparent) 0%,color-mix(in srgb,var(--nm-bg) 24%,transparent) 48%,transparent 74%);}
+    .nm-carousel-copy{position:relative;z-index:3;max-width:54%;min-width:0}
+    .nm-carousel-eyebrow{font-size:10px;font-weight:700;letter-spacing:.15em;text-transform:uppercase;color:var(--nm-t2)}
+    .nm-carousel-title{margin:8px 0 0;font-size:clamp(28px,3.2vw,42px);line-height:1.05;font-weight:750;
+      letter-spacing:-.035em;color:var(--nm-t1);word-break:break-word}
+    .nm-carousel-desc{margin:10px 0 0;font-size:13px;line-height:1.55;color:var(--nm-t2);max-width:40ch}
+    .nm-carousel-fallback{margin:6px 0 0;font-size:10.5px;color:var(--nm-t3);line-height:1.4;max-width:38ch;
+      display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+    .nm-carousel-fallback.is-error{color:var(--nm-error)}
+    .nm-carousel-cta{display:inline-flex;align-items:center;gap:7px;margin-top:18px;height:36px;padding:0 17px;
+      border-radius:999px;border:1px solid var(--nm-line);background:color-mix(in srgb,var(--nm-bg) 68%,transparent);
+      color:var(--nm-t1);font-size:12.5px;font-weight:650;backdrop-filter:blur(12px);
+      box-shadow:0 6px 18px -10px rgba(0,0,0,.5)}
+    .nm-carousel-collage{position:absolute;z-index:2;right:5%;top:50%;transform:translateY(-50%) rotate(-4deg);
+      width:40%;max-width:420px;display:grid;grid-template-columns:1fr 1fr;gap:10px;pointer-events:none;opacity:.96}
+    .nm-carousel-index{position:absolute;right:2px;top:-22px;font-size:10px;font-weight:600;letter-spacing:.14em;color:var(--nm-t3)}
+    .nm-carousel-cover{display:block;aspect-ratio:1;border-radius:13px;overflow:hidden;background:var(--nm-fill2);
+      border:1px solid rgba(255,255,255,.14);box-shadow:0 22px 44px -20px rgba(0,0,0,.55)}
+    .nm-carousel-cover img{width:100%;height:100%;object-fit:cover;display:block}
+    .nm-carousel-cover.c1{transform:rotate(-3deg) translateY(-6px)}
+    .nm-carousel-cover.c2{transform:rotate(2deg)}
+    .nm-carousel-cover.c3{transform:rotate(2deg) translateX(-4px)}
+    .nm-carousel-cover.c4{transform:rotate(-2deg) translateY(4px)}
+    .nm-carousel-cover-ph{width:100%;height:100%;display:grid;place-items:center;color:rgba(255,255,255,.6);
+      background:linear-gradient(140deg,color-mix(in srgb,var(--nm-accent) 55%,#333),color-mix(in srgb,var(--nm-accent-2) 42%,#111))}
+    .nm-carousel-arrow{position:absolute;top:50%;transform:translateY(-50%);z-index:6;width:36px;height:36px;
+      border-radius:50%;border:1px solid var(--nm-line);background:color-mix(in srgb,var(--nm-bg) 62%,transparent);
+      color:var(--nm-t1);display:grid;place-items:center;cursor:pointer;backdrop-filter:blur(14px);
+      opacity:.72;transition:opacity .18s ease,background .18s ease}
+    .nm-carousel-arrow:hover{opacity:1;background:color-mix(in srgb,var(--nm-bg) 84%,transparent)}
+    .nm-carousel-arrow.is-prev{left:14px}
+    .nm-carousel-arrow.is-next{right:14px}
+    .nm-carousel-dots{position:absolute;z-index:6;left:50%;bottom:16px;transform:translateX(-50%);
+      display:flex;align-items:center;gap:7px;padding:5px 9px;border-radius:999px;
+      background:color-mix(in srgb,var(--nm-bg) 38%,transparent);backdrop-filter:blur(10px)}
+    .nm-carousel-dot{width:7px;height:7px;border-radius:999px;border:0;padding:0;
+      background:color-mix(in srgb,var(--nm-t1) 32%,transparent);cursor:pointer;
+      transition:width .18s ease,background .18s ease}
+    .nm-carousel-dot.is-active{width:20px;background:var(--nm-accent)}
+
     /* ---------- 区块 ---------- */
     .nm-section{margin-top:34px;animation:nm-fade .4s ease both}
     .nm-section-head{display:flex;align-items:flex-end;gap:10px;margin:0 2px 14px}
@@ -4137,7 +4730,7 @@ window.__ModuleLoader__.load({
       font-size:12px;font-weight:600;box-shadow:var(--nm-shadow-pop);animation:nm-fade .2s ease both;
       pointer-events:none;white-space:nowrap;
     }
-    .nm-slider{position:relative;flex:1;min-width:0;height:18px;display:flex;align-items:center;cursor:pointer;touch-action:none;outline:none}
+    .nm-slider{position:relative;flex:1;min-width:0;height:22px;display:flex;align-items:center;cursor:pointer;touch-action:none;outline:none}
     .nm-slider-rail{position:relative;width:100%;height:4px;border-radius:999px;background:color-mix(in srgb,var(--nm-t1) 16%,transparent);transition:height 160ms ease}
     .nm-slider-fill{position:absolute;left:0;top:0;bottom:0;border-radius:999px;background:var(--nm-accent);transition:background 160ms ease}
     .nm-slider-thumb{
@@ -4317,7 +4910,7 @@ window.__ModuleLoader__.load({
       background:repeating-radial-gradient(circle at 50% 50%,rgba(255,255,255,.055) 0 1px,rgba(255,255,255,0) 1px 4px);
     }
     .nm-vinyl-label{
-      position:absolute;left:50%;top:50%;width:35%;aspect-ratio:1;transform:translate(-50%,-50%);
+      position:absolute;left:50%;top:50%;width:58%;aspect-ratio:1;transform:translate(-50%,-50%);
       border-radius:50%;overflow:hidden;clip-path:circle(50% at 50% 50%);
       border:2px solid rgba(255,255,255,.1);
       box-shadow:0 6px 18px rgba(0,0,0,.55);
@@ -4525,6 +5118,12 @@ window.__ModuleLoader__.load({
       .nm-hero-title{max-width:20ch}
       .nm-detail-desc{-webkit-line-clamp:2}
     }
+    @media (max-width:900px){
+      .nm-carousel-card{min-height:252px;padding:24px 24px 24px 60px}
+      .nm-carousel-copy{max-width:62%}
+      .nm-carousel-collage{width:38%;right:3%}
+      .nm-carousel-title{font-size:clamp(24px,3.4vw,32px)}
+    }
     @media (max-width:820px){
       .nm-hero{grid-template-columns:minmax(0,1fr);padding:26px 24px}
       .nm-hero-art{max-width:230px;justify-self:start;margin-top:6px}
@@ -4534,6 +5133,29 @@ window.__ModuleLoader__.load({
       .nm-search:focus-within{width:210px}
     }
     @media (max-width:768px){
+      .nm-carousel-head{flex-wrap:wrap;gap:10px}
+      .nm-carousel-card{min-height:224px;padding:20px 18px 20px 54px}
+      .nm-carousel-copy{max-width:70%}
+      .nm-carousel-collage{width:46%;right:-8%;opacity:.5}
+      .nm-carousel-title{font-size:clamp(23px,5.2vw,30px)}
+      .nm-carousel-desc{font-size:12px;margin-top:8px}
+      .nm-carousel-cta{height:32px;margin-top:14px;padding:0 14px;font-size:12px}
+      .nm-carousel-arrow{width:32px;height:32px}
+      .nm-carousel-arrow.is-prev{left:8px}
+      .nm-carousel-arrow.is-next{right:8px}
+      .nm-carousel-dots{bottom:12px}
+      .nm-carousel-eyebrow{display:none}
+    }
+    @media (max-width:520px){
+      .nm-carousel-card{min-height:206px;padding:18px 14px 18px 46px}
+      .nm-carousel-copy{max-width:78%}
+      .nm-carousel-collage{width:52%;right:-16%;opacity:.32}
+      .nm-carousel-title{font-size:22px}
+      .nm-carousel-desc{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+      .nm-carousel-dots{bottom:9px;gap:5px;padding:4px 7px}
+    }
+    @media (max-width:768px){
+
       .nm-wrap{padding:0 18px}
       .nm-header{padding:0 18px}
       .nm-header-row{flex-wrap:wrap;gap:8px}
@@ -4688,6 +5310,17 @@ window.__ModuleLoader__.load({
             }
           }
         }, 'netease-music: audio')
+
+        /* 进度条拖动：全局 pointerup / pointercancel 兜底提交 */
+        effect(() => {
+          const notify = () => notifySeekPointerUp()
+          window.addEventListener('pointerup', notify)
+          window.addEventListener('pointercancel', notify)
+          return () => {
+            window.removeEventListener('pointerup', notify)
+            window.removeEventListener('pointercancel', notify)
+          }
+        }, 'netease-music: seek pointer guard')
 
         /* 3) 文案：zh / en 注册 + bind；缺失时回退中文常量 */
         effect(() => {

@@ -434,6 +434,117 @@ async function main() {
     check('album 详情形状', () => { throw error })
   }
 
+  // 10.5) v4 听歌模式 mode（真机网络：心动 / 漫游 / 相似歌曲 / 相似艺人 / 每日推荐）
+  const modeSeedSongId = home?.daily?.[0]?.id ?? 441491828
+  const modeSeedArtistId = home?.daily?.[0]?.artists?.[0]?.id ?? 2843
+  info('mode 种子', `songId=${modeSeedSongId} artistId=${modeSeedArtistId}`)
+
+  const checkModePayload = (data, expectedType, label) => {
+    hasKeys(data, ['type', 'title', 'subtitle', 'resolvedSeed', 'fallbackUsed', 'songs'], label)
+    assert(data.type === expectedType, `${label}.type 应为 ${expectedType}，实际 ${data.type}`)
+    assert(typeof data.title === 'string' && data.title.length > 0, `${label}.title 应为非空 string`)
+    assert(typeof data.subtitle === 'string' && data.subtitle.length > 0, `${label}.subtitle 应为非空 string`)
+    assert(data.resolvedSeed && typeof data.resolvedSeed === 'object', `${label}.resolvedSeed 应为对象`)
+    assert('songId' in data.resolvedSeed && 'artistId' in data.resolvedSeed, `${label}.resolvedSeed 应含 songId/artistId`)
+    isIntOrNull(data.resolvedSeed.songId, `${label}.resolvedSeed.songId`)
+    isIntOrNull(data.resolvedSeed.artistId, `${label}.resolvedSeed.artistId`)
+    assert(
+      data.fallbackUsed === null || typeof data.fallbackUsed === 'string',
+      `${label}.fallbackUsed 应为 string|null，实际 ${JSON.stringify(data.fallbackUsed)}`,
+    )
+    assert(Array.isArray(data.songs), `${label}.songs 应为数组`)
+    assert(data.songs.length > 0, `${label}.songs 不应为空${data.error ? `（error：${data.error}）` : ''}`)
+    assert(!data.error, `${label} 成功时不应带 error：${data.error}`)
+    checkTrack(data.songs[0], `${label}.songs[0]`)
+    checkTrack(data.songs[data.songs.length - 1], `${label}.songs[last]`)
+    const ids = data.songs.map((song) => song.id)
+    assert(new Set(ids).size === ids.length, `${label}.songs 有重复 id（去重失效）`)
+  }
+
+  const modeCases = [
+    {
+      type: 'heart',
+      label: '心动模式',
+      params: { type: 'heart', seedSongId: modeSeedSongId, seedArtistId: modeSeedArtistId, limit: 20 },
+      limit: 20,
+    },
+    { type: 'roam', label: '漫游 / 私人 FM', params: { type: 'roam', limit: 20 }, limit: 20 },
+    {
+      type: 'similar_song',
+      label: '相似歌曲',
+      params: { type: 'similar_song', seedSongId: modeSeedSongId, limit: 20 },
+      limit: 20,
+    },
+    {
+      type: 'similar_artist',
+      label: '相似艺人',
+      params: { type: 'similar_artist', seedArtistId: modeSeedArtistId, limit: 20 },
+      limit: 20,
+    },
+    { type: 'daily', label: '每日推荐', params: { type: 'daily', limit: 30 }, limit: 30 },
+  ]
+
+  for (const modeCase of modeCases) {
+    const label = `mode ${modeCase.type}（${modeCase.label}）`
+    try {
+      const data = await call('mode', modeCase.params, 180000)
+      check(`${label} 形状与内容`, () => {
+        checkModePayload(data, modeCase.type, `mode.${modeCase.type}`)
+        assert(data.songs.length <= modeCase.limit, `songs 不应超过 limit=${modeCase.limit}，实际 ${data.songs.length}`)
+        if (modeCase.type === 'heart' || modeCase.type === 'similar_song') {
+          assert(
+            !data.songs.some((song) => song.id === modeSeedSongId),
+            `${label}.songs 不应包含种子歌曲本身`,
+          )
+        }
+      })
+      info(
+        label,
+        `${data.songs.length} 首 | ${data.fallbackUsed ? '已降级：' + data.fallbackUsed : '主接口可用'} | 首曲《${data.songs[0]?.name}》— ${data.songs[0]?.artist}`,
+      )
+    } catch (error) {
+      check(`${label} 形状与内容`, () => { throw error })
+    }
+  }
+
+  // 10.6) mode 种子推导：只给 seedSongId 时，相似艺人应自动从歌曲解析出歌手
+  try {
+    const data = await call('mode', { type: 'similar_artist', seedSongId: modeSeedSongId, limit: 12 }, 180000)
+    check('mode similar_artist 只给 seedSongId 时自动解析歌手', () => {
+      checkModePayload(data, 'similar_artist', 'mode.similar_artist(derive)')
+      assert(data.resolvedSeed.songId === modeSeedSongId, 'resolvedSeed.songId 应等于传入的 seedSongId')
+      assert(typeof data.resolvedSeed.artistId === 'number', '应从歌曲解析出 resolvedSeed.artistId')
+    })
+    info('mode 种子推导', `similar_artist resolvedSeed=${JSON.stringify(data.resolvedSeed)}`)
+  } catch (error) {
+    check('mode similar_artist 只给 seedSongId 时自动解析歌手', () => { throw error })
+  }
+
+  // 10.7) mode 完全不给种子：应自动回落到每日推荐第一首（契约 §12.3 种子优先级）
+  try {
+    const data = await call('mode', { type: 'heart', limit: 8 }, 180000)
+    check('mode 不给种子时自动用每日推荐首曲', () => {
+      checkModePayload(data, 'heart', 'mode.heart(auto-seed)')
+      assert(typeof data.resolvedSeed.songId === 'number', 'resolvedSeed.songId 应自动解析为每日推荐首曲')
+    })
+    info('mode 自动种子', `heart resolvedSeed=${JSON.stringify(data.resolvedSeed)} songs=${data.songs.length}`)
+  } catch (error) {
+    check('mode 不给种子时自动用每日推荐首曲', () => { throw error })
+  }
+
+  // 10.8) mode 非法类型 → 协议错误
+  try {
+    const badMode = await callRaw('mode', { type: 'not_a_mode' })
+    check('mode 非法类型返回 ok:false（INTERNAL）', () => {
+      assert(badMode.ok === false, 'ok 应为 false')
+      assert(badMode.code === 'INTERNAL', `code 应为 INTERNAL，实际 ${badMode.code}`)
+      assert(typeof badMode.error === 'string' && badMode.error.length > 0, 'error 应为非空字符串')
+    })
+    info('mode 非法类型', `${badMode.code}: ${badMode.error}`)
+  } catch (error) {
+    check('mode 非法类型返回 ok:false（INTERNAL）', () => { throw error })
+  }
+
   // 11) song_url
   try {
     const url = await call('song_url', { id: 441491828 }, 120000)

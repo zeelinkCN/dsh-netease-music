@@ -37,6 +37,9 @@ const cfg = {
   vipType: 11,
   level: 9,
   trial: false,
+  slowSeekMs: 0,      // >0：audio Range 请求 start>0 时延迟（模拟慢速 seek）
+  slowAudioMs: 0,     // >0：所有 /audio 响应延迟（模拟 metadata 迟到）
+  modeError: null,    // null | 'empty' | 'error'：/mode 接口异常模拟
   engine: 'installed',   // installed | missing | installing | failed
   installError: false,
   install: { state: 'idle', phase: 'idle', lines: [], error: null, installed: true, startedAt: 0 },
@@ -504,7 +507,7 @@ async function handleApi(req, res, path, searchParams) {
 
   if (isErrorMode('all') || isErrorMode('home')) {
     // 错误模式只影响数据接口，登录 / status 保持可用，方便单独验证错误态 UI
-    const dataRoutes = new Set(['/home', '/daily', '/playlists', '/playlist', '/artist', '/album', '/search', '/subscriptions', '/song/url', '/lyrics'])
+    const dataRoutes = new Set(['/home', '/daily', '/playlists', '/playlist', '/artist', '/album', '/search', '/subscriptions', '/song/url', '/lyrics', '/mode'])
     if (dataRoutes.has(path)) {
       return fail(res, 'NETWORK', '网络开小差了，请稍后重试', 500)
     }
@@ -536,6 +539,40 @@ async function handleApi(req, res, path, searchParams) {
 
     case '/album':
       return ok(res, albumDetail(searchParams.get('id')))
+
+    case '/mode': {
+      const type = searchParams.get('type') || 'heart'
+      if (cfg.modeError === 'error') return fail(res, 'NETWORK', '推荐模式暂不可用，请稍后重试', 500)
+      const limit = Math.max(12, Math.min(20, Number(searchParams.get('limit')) || 16))
+      if (cfg.modeError === 'empty') {
+        return ok(res, { type, title: '按心情推荐', subtitle: '', resolvedSeed: null, fallbackUsed: null, songs: [] })
+      }
+      const seedId = searchParams.get('songId')
+      const artistId = searchParams.get('artistId')
+      const seedTrack = tracks.find((t) => String(t.id) === String(seedId)) || tracks[0]
+      const seedArtist = artists.find((a) => String(a.id) === String(artistId)) || artists[0]
+      const META = {
+        heart: ['心动模式', '从你红心的歌里，挑一些此刻会心动的', 3],
+        roam: ['漫游模式', '跳出日常口味，随机漫游到一首新歌', 7],
+        similar_song: ['相似歌曲', '和这首「' + seedTrack.name + '」气质相近的歌', 11],
+        similar_artist: ['相似歌手', '像「' + seedArtist.name + '」一样的歌手与歌', 17],
+        daily: ['每日推荐', '根据你的口味，为你精选今日推荐', 0],
+      }
+      const meta = META[type] || META.heart
+      const offset = meta[2]
+      const songs = []
+      for (let i = 0; i < limit; i++) songs.push(tracks[(offset + i * 3) % tracks.length])
+      return ok(res, {
+        type,
+        title: meta[0],
+        subtitle: meta[1],
+        resolvedSeed: type === 'similar_artist'
+          ? { type: 'artist', id: seedArtist.id, name: seedArtist.name }
+          : { type: 'song', id: seedTrack.id, name: seedTrack.name, artist: seedTrack.artist },
+        fallbackUsed: (type === 'roam' || type === 'similar_song') && !seedId ? '今日推荐第一首' : null,
+        songs,
+      })
+    }
 
     case '/search': {
       const type = searchParams.get('type') || 'song'
@@ -687,6 +724,9 @@ const server = createServer(async (req, res) => {
     loginCheckCount = 0
     cfg.errorMode = null
     cfg.slowMs = 0
+    cfg.slowSeekMs = 0
+    cfg.slowAudioMs = 0
+    cfg.modeError = null
     cfg.engine = 'installed'
     cfg.installError = false
     cfg.install = { state: 'idle', phase: 'idle', lines: [], error: null, installed: true, startedAt: 0 }
@@ -696,6 +736,21 @@ const server = createServer(async (req, res) => {
   /* 音频 / 图片代理（非 JSON） */
   if (pathname === '/netease-panel/api/audio') {
     calls.push({ at: Date.now(), method: req.method, path: pathname, search: u.search })
+    const range = req.headers.range || ''
+    const startMatch = /^bytes=(\d+)-/.exec(range)
+    const rangeStart = startMatch ? Number(startMatch[1]) : 0
+    if (cfg.slowAudioMs > 0) await sleep(cfg.slowAudioMs)
+    if (cfg.slowSeekMs > 0) {
+      // 只先返回 1/4 数据，强制浏览器后续用 Range 取剩余部分；
+      // start>0 的 Range 请求延迟 slowSeekMs，用于模拟慢速 seek。
+      const quarter = Math.floor(WAV.length / 4)
+      const m = /^bytes=(\d+)-(\d*)$/.exec(range)
+      if (!m || Number(m[1]) === 0) {
+        req.headers.range = 'bytes=0-' + (quarter - 1)
+      } else if (rangeStart > 0) {
+        await sleep(cfg.slowSeekMs)
+      }
+    }
     return serveAudio(req, res, u.searchParams.get('level') || 'auto')
   }
   if (pathname === '/netease-panel/api/img') {

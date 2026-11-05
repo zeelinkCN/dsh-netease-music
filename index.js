@@ -46,6 +46,7 @@ const UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36'
 
 const AUDIO_LEVELS = new Set(['auto', 'standard', 'exhigh', 'lossless', 'hires'])
+const MODE_TYPES = new Set(['heart', 'roam', 'similar_song', 'similar_artist', 'daily'])
 const AUDIO_MIME = {
   mp3: 'audio/mpeg',
   flac: 'audio/flac',
@@ -692,6 +693,21 @@ export function apply(ctx) {
           )
         }),
       ),
+      /* 听歌模式：心动 / 漫游 / 相似歌曲 / 相似艺人 / 每日推荐（首页轮播用） */
+      route(
+        'mode',
+        handle((url) => {
+          const type = String(url.searchParams.get('type') || 'daily')
+          if (!MODE_TYPES.has(type)) throw new PluginError('不支持的模式：' + type, 'NOT_FOUND')
+          const songId = num(url.searchParams.get('songId'))
+          const artistId = num(url.searchParams.get('artistId'))
+          const limit = Math.min(60, Math.max(5, Number(url.searchParams.get('limit')) || 30))
+          return cache.wrap(`mode:${type}:${songId || 0}:${artistId || 0}:${limit}`, 5 * 60 * 1000, () =>
+            bridge.call('mode', { type, seedSongId: songId, seedArtistId: artistId, limit }, { timeoutMs: 45_000 }),
+          )
+        }),
+      ),
+
       route(
         'song/url',
         handle((url) => {

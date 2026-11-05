@@ -39,12 +39,13 @@ cd netease-panel-selftest
 - `/song/url?level=`：`auto→exhigh/320000`、`standard/128000`、`exhigh/320000`、`lossless/1512987`、`hires/1512987`；`trial` 可用 `/__config {trial:true}` 打开。
 - `/img?u=` 返回本地 SVG 兜底（client 封面失败 fallback 用）。
 - `/login/start` 返回固定 QR SVG data URL；`/login/check` 第 1、2 次 `waiting`、第 3 次 `scanned`、第 4 次 `ok`（契约第 9 节）。
+- v4 `/mode?type=heart|roam|similar_song|similar_artist|daily&songId=&artistId=&limit=`：返回 `{type,title,subtitle,resolvedSeed,fallbackUsed,songs}`，5 种 type 各 12–20 首；`fallbackUsed` 在无 seed 的 roam/similar_song 时为「今日推荐第一首」；`/__config {modeError:'empty'|'error'}` 模拟空数据/接口错误（UI 应 toast + 可重试）。
 - v3 引擎安装：`POST /setup/install` 启动状态机（clone→venv→pip→verify→done，约 3.2s），`GET /setup/install/log` 返回 `{state,phase,lines,error,installed}`；`/status` 带 `engine:'installed|missing|installing|failed'` 与 `install` 摘要。`/__config {installError:true}` 可模拟失败。
 - 控制面：`POST /__config`（`authed` / `bridge:'ready'|'starting'|'error'` / `engine` / `installError` / `errorMode:null|'home'|'all'` / `slowMs` / `trial`），`GET /__calls`，`POST /__reset`。
   - `bridge:'error'` → `/status` 报 `bridge:'error'`，数据接口 503 `code:'BRIDGE'`（验证「引擎缺失」不白屏）。
   - `errorMode:'home'` → 数据接口 500 `code:'NETWORK'`（验证错误态 + 重试原地恢复）。
 
-## 断言覆盖（198 项，v1 + v2 + v3）
+## 断言覆盖（258 项，v1–v4）
 
 1. 模块：client.js 加载、`__ModuleLoader__.load`、3 个 slot 注册及 spec（`main.key`、`sidebar.panellist.id/order=30`、`shell.overlay.id`）、`<audio data-nm-audio>` 创建、无曲目时播放条不渲染。
    侧栏图标：`<img>`、`src` 为 `data:image/png;base64,`（官方红标）、`naturalWidth>0`、渲染尺寸 = 传入 size(20)，深/浅色各一张 4x 放大截图。
@@ -66,7 +67,10 @@ cd netease-panel-selftest
     - 返回：np-back/Esc 回列表；dock-cover 重进播放页；浅色播放页截图。
 11. v3 header：滚动 800px 后 `[data-nm="header"]` 贴面板顶（差 <2px）、背景 alpha ≥0.9、高度覆盖 clearance 且 ≤56px、sticky/fixed；header logo 为 PNG dataURL img（naturalWidth>0、≤26px）。
 12. v3 引擎无感安装：engine missing → 出现安装 UI/日志/进度 → 点安装（或自动）→ done 后卡片消失、自动渲染首页、`/status.engine=installed`；失败态显示 error + `engine-retry`。
-13. 运行期：无 `console.error`、无未捕获页面异常；重新播放后播放条恢复。
+13. v4 Hero 轮播 + `/mode`：`hero-carousel`、7 张 `carousel-card`（5 真实 + 2 clone，clone `data-clone=true`）、5 种 mode；next/prev 换卡；7s 自动切换；hover 后 7s 暂停；transition 360ms；最后一张 → next 平滑回绕（中途 transform 位移、结束 activeDot=0），第一张 → prev 回绕到最后；6s 自动在最后一张平滑绕回第一张；点 similar_song 卡（无在播）请求带 `songId=今日推荐第一首`；点 daily 卡切换播放；`modeError:'error'/'empty'` 时 toast 出现且不崩溃。
+14. v4 播放页布局纠正：进入 Now Playing 后底部 dock 必须存在（`dock=1`），**全页 `player-progress` 恰好 1 条且播放页内部 0 条**，传输键组只有底部一组（NP 内 0 组）；黑胶盘心 label 直径/盘面直径 ≈0.58（±0.03）且 label/img 正圆；返回列表 dock 恢复。
+15. seek 回归：慢速 seek（`data-seeking=true` 保持、松手不回落、完成后 ≈70%）、真实时序拖拽 70%、点按 50%、pointerup 派发到 body 仍提交 30%、metadata 迟到 pendingSeek 生效 ≈60%、键盘 ArrowRight/Home/End、命中高度 22px。
+16. 运行期：无 `console.error`、无未捕获页面异常；重新播放后播放条恢复。
 
 ## 截图
 
@@ -101,6 +105,10 @@ cd netease-panel-selftest
 | `shots/21-nowplaying-vinyl-circular.png` | v3 正圆黑胶（互斥模式） |
 | `shots/22-install-progress.png` | v3 引擎安装中（进度/日志） |
 | `shots/23-engine-installed.png` | v3 引擎装好、卡片消失后的首页 |
+| `shots/24-hero-carousel.png` | v4 首页 Hero 轮播（5 模式 + clone） |
+| `shots/24-carousel-1.png` / `24-carousel-2.png` / `24-carousel-3.png` | 轮播第 1/2/3 张卡 |
+| `shots/24-carousel-wrap.png` | 轮播最后一张 → 第一张回绕动画中的一帧 |
+| `shots/25-nowplaying-with-dock.png` | v4 播放页底部 dock 存在、无第二组进度/传输键 |
 
 ## 主题 token 说明（与真实 Harness 的差异）
 
@@ -122,6 +130,8 @@ cd netease-panel-selftest
 - v3 假侧栏用 56px/280px 两种宽度模拟 DSH 侧栏；`sidebar.footer.action` 用固定 footer 容器 + 注入的 `usePanelInfo`（`window.__setActivePanel`）模拟真实槽位/面板切换；主区在 conversation 时切换为假对话页（`#fake-conversation`）。真实 Harness 的槽位宽度、注入 hook 形状可能不同，需真机复核。
 - 面板内 dock 断言基于「dock 是 flex 布局行、scroll 在上」；真实 DSH 的 `--dsh-frame-top-clearance` 下 header 是否与框架顶栏严丝合缝**无法离线验证**，需真机目视。
 - 引擎安装是本地 mock 状态机（clone→venv→pip→verify→done），不实际安装 Python 包；真实安装时长/网络错误形态需真机验证。
+- v4 轮播依赖真实计时（自动 6s、hover 暂停、回绕动画 360ms），断言用真实时间采样，整轮耗时约 4–5 分钟；`/mode` 数据为 mock。
+- v4 慢速 seek 用「首包只回 1/4 + Range 延迟 1200ms」模拟，本机 Chrome 若已缓冲仍可能瞬时完成；断言同时校验 data-seeking 保持与最终位置。
   真实安装后 `--dsh-frame-top-clearance` 是否存在、页面顶部是否被 Harness 顶栏遮挡，**本 harness 无法验证**（需在真实 Harness 里目视确认）。
 - mock 音频是 3s 正弦波，与真实曲目时长无关；播放/切歌/进度/ended 只验证行为，不验证真实音质。
 - 封面/头像是本地渐变 SVG，不是真实图片，视觉上只检查布局与占位。

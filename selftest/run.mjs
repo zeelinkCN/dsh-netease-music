@@ -585,6 +585,297 @@ try {
   await scrollTop()
   await S('05-home-dark.png')
 
+  console.log('\n[2b] v4 Hero 轮播 + /mode 模式接口')
+  let carouselOk = false
+  try {
+    await waitFor(`!!document.querySelector('[data-nm="hero-carousel"]')`, 'hero carousel', 9000)
+    carouselOk = true
+    check('Hero 轮播 [data-nm="hero-carousel"] 出现', true)
+  } catch (err) {
+    check('Hero 轮播 [data-nm="hero-carousel"] 出现', false, '9s 内未找到（v4 轮播可能未落盘）')
+  }
+  const carouselInfo = await evaluate(`(() => {
+    const cards = [...document.querySelectorAll('[data-nm="carousel-card"]')]
+    return {
+      count: cards.length,
+      modes: cards.map((c) => c.getAttribute('data-mode')),
+      active: cards.filter((c) => c.getAttribute('data-active') === 'true').map((c) => c.getAttribute('data-mode')),
+    }
+  })()`)
+  check('轮播卡片 ≥5 张', carouselInfo.count >= 5, JSON.stringify(carouselInfo))
+  check('轮播覆盖 heart/roam/similar_song/similar_artist/daily 五种 mode',
+    ['heart', 'roam', 'similar_song', 'similar_artist', 'daily'].every((m) => carouselInfo.modes.includes(m)),
+    JSON.stringify(carouselInfo.modes))
+  await S('24-hero-carousel.png')
+  await S('24-carousel-1.png')
+
+  const currentCarousel = () => evaluate(`(() => {
+    const cards = [...document.querySelectorAll('[data-nm="carousel-card"]')]
+    if (!cards.length) return null
+    let cur = cards.find((c) => c.getAttribute('data-active') === 'true') || cards.find((c) => c.classList.contains('is-active'))
+    if (!cur) {
+      const wrap = document.querySelector('[data-nm="hero-carousel"]')
+      const wr = wrap ? wrap.getBoundingClientRect() : null
+      let best = null
+      cards.forEach((c) => {
+        const r = c.getBoundingClientRect()
+        const cx = (r.left + r.right) / 2
+        const dist = wr ? Math.abs(cx - (wr.left + wr.width / 2)) : 0
+        if (!best || dist < best.dist) best = { dist, card: c }
+      })
+      cur = best && best.card
+    }
+    return cur ? { mode: cur.getAttribute('data-mode'), title: (cur.textContent || '').trim().slice(0, 40) } : null
+  })()`)
+  const car0 = await currentCarousel()
+  check('轮播有当前卡片', !!car0, JSON.stringify(car0))
+  check('点 carousel-next', await clickSel('[data-nm="carousel-next"]'))
+  await sleep(750)
+  const car1 = await currentCarousel()
+  check('点 carousel-next 后当前卡片变化',
+    !!car0 && !!car1 && (car1.mode !== car0.mode || car1.title !== car0.title), JSON.stringify({ before: car0, after: car1 }))
+  await S('24-carousel-2.png')
+  check('点 carousel-prev', await clickSel('[data-nm="carousel-prev"]'))
+  await sleep(750)
+  const car2 = await currentCarousel()
+  check('点 carousel-prev 后当前卡片变化',
+    !!car1 && !!car2 && (car2.mode !== car1.mode || car2.title !== car1.title), JSON.stringify({ before: car1, after: car2 }))
+  // 自动轮播（7s）
+  await sleep(7300)
+  const car3 = await currentCarousel()
+  check('等待 7s 后自动轮播切换卡片',
+    !!car2 && !!car3 && (car3.mode !== car2.mode || car3.title !== car2.title), JSON.stringify({ before: car2, after: car3 }))
+  // hover 暂停
+  const carHoverBefore = await currentCarousel()
+  await evaluate(`(() => {
+    const el = document.querySelector('[data-nm="hero-carousel"]')
+    if (!el) return
+    ;['mouseover', 'mouseenter', 'mousemove'].forEach((t) => el.dispatchEvent(new MouseEvent(t, { bubbles: true })))
+  })()`)
+  await sleep(7300)
+  const carHoverAfter = await currentCarousel()
+  check('hover 轮播后 7s 内暂停自动切换',
+    !!carHoverBefore && !!carHoverAfter && carHoverAfter.mode === carHoverBefore.mode && carHoverAfter.title === carHoverBefore.title,
+    JSON.stringify({ before: carHoverBefore, after: carHoverAfter }))
+  await evaluate(`(() => {
+    const el = document.querySelector('[data-nm="hero-carousel"]')
+    if (!el) return
+    ;['mouseout', 'mouseleave'].forEach((t) => el.dispatchEvent(new MouseEvent(t, { bubbles: true })))
+  })()`)
+
+  // ---- v4.1 无缝无限轮播（clone 两端）----
+  const carouselGeometry = () => evaluate(`(() => {
+    const wrap = document.querySelector('[data-nm="hero-carousel"]')
+    const cards = [...document.querySelectorAll('[data-nm="carousel-card"]')]
+    if (!wrap || !cards.length) return null
+    const track = wrap.querySelector('.nm-carousel-track') || [...wrap.querySelectorAll('*')].find((el) => {
+      const cs = getComputedStyle(el)
+      return cs.transform && cs.transform !== 'none' && el.children.length >= cards.length
+    }) || cards[0].parentElement
+    const cr = cards[0].getBoundingClientRect()
+    const cs = track ? getComputedStyle(track) : null
+    let x = 0
+    if (cs && cs.transform && cs.transform !== 'none') {
+      const m = /matrix\\(([-\\d.]+),\\s*([-\\d.]+),\\s*([-\\d.]+),\\s*([-\\d.]+),\\s*([-\\d.]+),/.exec(cs.transform)
+      if (m) x = parseFloat(m[5])
+      else { const m3 = /matrix3d\\(([^)]+)\\)/.exec(cs.transform); if (m3) x = parseFloat(m3[1].split(',')[12]) }
+    }
+    const activeDot = document.querySelector('[data-nm="carousel-dot"][aria-selected="true"]') ||
+      document.querySelector('[data-nm="carousel-dot"].is-active')
+    return {
+      wrapW: Math.round(wrap.getBoundingClientRect().width),
+      cardW: Math.round(cr.width),
+      x,
+      dots: [...document.querySelectorAll('[data-nm="carousel-dot"]')].length,
+      activeDot: activeDot ? Number(activeDot.getAttribute('data-index')) : null,
+      clones: document.querySelectorAll('[data-nm="carousel-card"][data-clone="true"]').length,
+      cardCount: cards.length,
+      modes: cards.map((c) => c.getAttribute('data-mode')),
+      transition: cs ? { property: cs.transitionProperty, duration: cs.transitionDuration, timing: cs.transitionTimingFunction } : null,
+    }
+  })()`)
+  const carouselDots = async (idx) => {
+    const ok = await evaluate(`(() => {
+      const dot = document.querySelector('[data-nm="carousel-dot"][data-index="${idx}"]')
+      if (!dot) return false
+      dot.click()
+      return true
+    })()`)
+    if (!ok) {
+      // 没有可点的 dot 时用 next/prev 次数兜底
+      for (let i = 0; i < 6; i++) { await clickSel('[data-nm="carousel-next"]'); await sleep(120) }
+    }
+    await sleep(700)
+    return ok
+  }
+  const cg = await carouselGeometry()
+  check('轮播有 clone 节点（data-clone=true 两个）/ 卡片数=5+2',
+    !!cg && (cg.clones === 2 || cg.cardCount === 7),
+    JSON.stringify(cg && { clones: cg.clones, cardCount: cg.cardCount, modes: cg.modes }))
+  const durMatch = cg && cg.transition && /([\d.]+)(m?s)/.exec(cg.transition.duration || '')
+  let durMs = null
+  if (durMatch) durMs = durMatch[2] === 's' ? parseFloat(durMatch[1]) * 1000 : parseFloat(durMatch[1])
+  check('轮播 transition 时长约 300ms（150–800ms）', durMs != null && durMs >= 150 && durMs <= 800,
+    JSON.stringify(cg && cg.transition))
+  await carouselDots(2)
+  await S('24-carousel-3.png')
+  await carouselDots(0)
+
+  // 最后一张 → next → 第一张（动画中位移 ≈ 1 张卡宽，不能瞬间回 0）
+  await carouselDots(4)
+  const lastGeo = await carouselGeometry()
+  check('可切到最后一张（activeDot=4）', !!lastGeo && lastGeo.activeDot === 4, JSON.stringify(lastGeo && { activeDot: lastGeo.activeDot }))
+  check('点 carousel-next（最后一张回绕）', await clickSel('[data-nm="carousel-next"]'))
+  let wrapMid = null
+  let wrapMidDelta = null
+  let wrapMaxDelta = 0
+  for (let i = 0; i < 6; i++) {
+    await sleep(90)
+    const g = await carouselGeometry()
+    if (!g || !lastGeo) continue
+    const d = Math.abs(g.x - lastGeo.x)
+    if (d > wrapMaxDelta) wrapMaxDelta = d
+    if (i === 1) { wrapMid = g; wrapMidDelta = d; await screenshot('24-carousel-wrap.png'); shots.push(join(SHOTS, '24-carousel-wrap.png')) }
+  }
+  check('next 回绕动画进行中（~120ms）已离开原位、未瞬间归 0',
+    !!wrapMid && wrapMidDelta != null && wrapMidDelta > (lastGeo.cardW * 0.15) && Math.abs(wrapMid.x) > 1,
+    JSON.stringify({ before: lastGeo && lastGeo.x, mid: wrapMid && wrapMid.x, cardW: lastGeo && lastGeo.cardW, delta: wrapMidDelta }))
+  check('next 回绕动画期间位移达到约 1 张卡宽（≥0.8 卡宽）',
+    !!lastGeo && wrapMaxDelta >= lastGeo.cardW * 0.8,
+    JSON.stringify({ maxDelta: wrapMaxDelta, cardW: lastGeo && lastGeo.cardW }))
+  await sleep(650)
+  const afterWrap = await carouselGeometry()
+  check('回绕动画结束后高亮回到第 1 张', !!afterWrap && afterWrap.activeDot === 0, JSON.stringify(afterWrap && { activeDot: afterWrap.activeDot }))
+
+  // 第一张 → prev → 最后一张（平滑反向）
+  await carouselDots(0)
+  const firstGeo = await carouselGeometry()
+  check('可切回第一张（activeDot=0）', !!firstGeo && firstGeo.activeDot === 0, JSON.stringify(firstGeo && { activeDot: firstGeo.activeDot }))
+  check('点 carousel-prev（第一张回绕到最后）', await clickSel('[data-nm="carousel-prev"]'))
+  let prevMid = null
+  let prevMidDelta = null
+  let prevMaxDelta = 0
+  for (let i = 0; i < 6; i++) {
+    await sleep(90)
+    const g = await carouselGeometry()
+    if (!g || !firstGeo) continue
+    const d = Math.abs(g.x - firstGeo.x)
+    if (d > prevMaxDelta) prevMaxDelta = d
+    if (i === 1) { prevMid = g; prevMidDelta = d }
+  }
+  check('prev 回绕动画进行中（~120ms）已离开原位',
+    !!prevMid && prevMidDelta != null && prevMidDelta > (firstGeo.cardW * 0.15),
+    JSON.stringify({ before: firstGeo && firstGeo.x, mid: prevMid && prevMid.x, cardW: firstGeo && firstGeo.cardW }))
+  check('prev 回绕动画期间位移达到约 1 张卡宽（≥0.8 卡宽）',
+    !!firstGeo && prevMaxDelta >= firstGeo.cardW * 0.8,
+    JSON.stringify({ maxDelta: prevMaxDelta, cardW: firstGeo && firstGeo.cardW }))
+  await sleep(650)
+  const afterPrevWrap = await carouselGeometry()
+  check('prev 回绕结束后高亮为第 5 张（activeDot=4）', !!afterPrevWrap && afterPrevWrap.activeDot === 4,
+    JSON.stringify(afterPrevWrap && { activeDot: afterPrevWrap.activeDot }))
+
+  // 自动轮播（6s）在最后一张平滑绕回第一张
+  await carouselDots(4)
+  const autoStart = await carouselGeometry()
+  const autoDotStart = autoStart ? autoStart.activeDot : null
+  check('自动回绕前处于最后一张（activeDot=4）', autoDotStart === 4, JSON.stringify(autoStart && { activeDot: autoStart.activeDot }))
+  let autoMidDeltas = []
+  let autoEndDot = autoDotStart
+  let autoLastX = autoStart ? autoStart.x : 0
+  const autoT0 = Date.now()
+  while (Date.now() - autoT0 < 7800) {
+    await sleep(45)
+    const g = await carouselGeometry()
+    if (!g || !autoStart) continue
+    const d = Math.abs(g.x - autoLastX)
+    if (d > autoStart.cardW * 0.08 && d < autoStart.cardW * 2.5) autoMidDeltas.push(Math.round(d))
+    autoLastX = g.x
+    autoEndDot = g.activeDot
+    if (autoEndDot === 0 && autoMidDeltas.length) break
+  }
+  check('6s 自动轮播在最后一张平滑绕回第一张（观察到动画中间帧 + 结束为第 1 张）',
+    autoMidDeltas.length > 0 && autoEndDot === 0,
+    JSON.stringify({ midDeltas: autoMidDeltas.slice(0, 12), endDot: autoEndDot, cardW: autoStart && autoStart.cardW }))
+
+  // 种子：无在播曲目时点 similar_song，请求应带 songId=今日推荐第一首
+  check('轮播种子测试前无在播曲目（dock 不存在）', !(await evaluate(`!!document.querySelector('[data-nm="dock"]')`)))
+  const seedCardClicked = await evaluate(`(() => {
+    const card = [...document.querySelectorAll('[data-nm="carousel-card"]')].find((c) => c.getAttribute('data-mode') === 'similar_song')
+    if (!card) return false
+    const btn = card.querySelector('[data-nm="carousel-play"], button')
+    ;(btn || card).click()
+    return true
+  })()`)
+  check('点击 similar_song 轮播卡', seedCardClicked)
+  try {
+    await waitFor(`(() => {
+      const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio')
+      return !!a && a.paused === false && a.currentTime > 0.2
+    })()`, 'carousel similar plays', 10000)
+    check('点 similar_song 卡后 audio 开始播放', true)
+  } catch (err) {
+    check('点 similar_song 卡后 audio 开始播放', false, String(err))
+  }
+  check('点轮播卡后底部 dock 出现（队列已生效）', await evaluate(`!!document.querySelector('[data-nm="dock"]')`))
+  const modeCalls = (await calls()).filter((c) => c.path === '/netease-panel/api/mode')
+  const similarCall = modeCalls.filter((c) => /type=similar_song/.test(c.search || '')).pop()
+  check('相似歌曲请求带 songId=今日推荐第一首 id（1901371647）',
+    !!similarCall && (similarCall.search || '').includes('songId=1901371647'),
+    JSON.stringify({ call: similarCall && similarCall.search, all: modeCalls.map((c) => c.search) }))
+  // 点 daily 卡切换歌曲
+  const beforeDailyId = await audioTrackId()
+  const dailyClicked = await evaluate(`(() => {
+    const card = [...document.querySelectorAll('[data-nm="carousel-card"]')].find((c) => c.getAttribute('data-mode') === 'daily')
+    if (!card) return false
+    const btn = card.querySelector('[data-nm="carousel-play"], button')
+    ;(btn || card).click()
+    return true
+  })()`)
+  check('点击 daily 轮播卡', dailyClicked)
+  try {
+    await waitFor(`(() => {
+      const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio')
+      if (!a) return false
+      const m = /[?&]id=(\\d+)/.exec(a.getAttribute('src') || '')
+      return !!m && m[1] !== ${JSON.stringify(beforeDailyId)} && a.paused === false
+    })()`, 'daily carousel plays', 10000)
+    check('点 daily 卡后切换播放曲目', true)
+  } catch (err) {
+    check('点 daily 卡后切换播放曲目', false, String(err))
+  }
+  // 接口 error / empty：toast 出现且不崩溃
+  await config({ modeError: 'error' })
+  await evaluate(`(() => {
+    const card = [...document.querySelectorAll('[data-nm="carousel-card"]')].find((c) => c.getAttribute('data-mode') === 'heart')
+    if (!card) return
+    const btn = card.querySelector('[data-nm="carousel-play"], button')
+    ;(btn || card).click()
+  })()`)
+  try {
+    await waitFor(`!!document.querySelector('.nm-toast, [data-nm="toast"], [role="status"]')`, 'mode error toast', 8000)
+    check('mode 接口 error 时出现 toast', true)
+  } catch (err) {
+    check('mode 接口 error 时出现 toast', false, String(err))
+  }
+  await config({ modeError: 'empty' })
+  await evaluate(`(() => {
+    const card = [...document.querySelectorAll('[data-nm="carousel-card"]')].find((c) => c.getAttribute('data-mode') === 'roam')
+    if (!card) return
+    const btn = card.querySelector('[data-nm="carousel-play"], button')
+    ;(btn || card).click()
+  })()`)
+  try {
+    await waitFor(`(() => {
+      const t = document.querySelector('.nm-toast, [data-nm="toast"], [role="status"]')
+      return !!t && /空|暂无|没有|无推荐|失败|不可用|稍后/.test(t.textContent || '')
+    })()`, 'mode empty toast', 8000)
+    check('mode 接口空数据时 toast/空提示出现', true)
+  } catch (err) {
+    check('mode 接口空数据时 toast/空提示出现', false, String(err))
+  }
+  await config({ modeError: null })
+  check('轮播异常后页面仍无未处理异常（错误收集在最后统一断言）', true)
+
   console.log('\n[3] 播放：播放全部 → 播放条出现 → 播放中 → 进度前进 → 下一首 → 暂停')
   check('点击「播放全部」', await clickSel('[data-nm="play-all"]'))
   try {
@@ -1144,6 +1435,43 @@ try {
       const st = await evaluate(`(() => { const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio'); return a ? { t: a.currentTime, paused: a.paused } : null })()`)
       check('播放页内 audio 在播（currentTime 前进）', false, JSON.stringify(st))
     }
+    const npDup = () => evaluate(`(() => {
+      const visible = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(el).visibility !== 'hidden' }
+      const scope = document.querySelector('[data-nm="nowplaying"]')
+      const inScope = (sel) => scope ? [...scope.querySelectorAll(sel)].filter(visible) : []
+      const dock = [...document.querySelectorAll('[data-nm="dock"]')].filter(visible)
+      const progress = [...document.querySelectorAll('[data-nm="player-progress"], [data-nm="np-progress"], .nm-np-progress')].filter(visible)
+      const plays = [...document.querySelectorAll('[data-nm="player-toggle"], [data-nm="np-play"]')].filter(visible)
+      const prevs = [...document.querySelectorAll('[data-nm="player-prev"], [data-nm="np-prev"]')].filter(visible)
+      const nexts = [...document.querySelectorAll('[data-nm="player-next"], [data-nm="np-next"]')].filter(visible)
+      const dockBits = [...document.querySelectorAll('[data-nm="dock-cover"], .nm-dock-name, .nm-dock-text')].filter(visible)
+      return {
+        dock: dock.length,
+        progress: progress.length,
+        plays: plays.length,
+        prevs: prevs.length,
+        nexts: nexts.length,
+        dockBits: dockBits.length,
+        npProgress: inScope('[data-nm="player-progress"], [data-nm="np-progress"], .nm-np-progress').length,
+        npPlays: inScope('[data-nm="player-toggle"], [data-nm="np-play"]').length,
+        npPrevs: inScope('[data-nm="player-prev"], [data-nm="np-prev"]').length,
+        npNexts: inScope('[data-nm="player-next"], [data-nm="np-next"]').length,
+      }
+    })()`)
+    const np0 = await npDup()
+    check('播放页内底部 dock 存在（v4：整条底部工具栏）', np0.dock === 1, JSON.stringify(np0))
+    check('全页进度条恰好 1 条（播放页内部 0 条）',
+      np0.progress === 1 && np0.npProgress === 0, JSON.stringify(np0))
+    check('传输键组只有底部 dock 这一组（播放页内部 0 组）',
+      np0.plays === 1 && np0.prevs === 1 && np0.nexts === 1 &&
+      np0.npPlays === 0 && np0.npPrevs === 0 && np0.npNexts === 0, JSON.stringify(np0))
+    check('底部 dock 工具栏仍含封面/歌名信息', np0.dockBits >= 1, JSON.stringify(np0))
+    await S('25-nowplaying-with-dock.png')
+    const audioPaused = () => evaluate(`(() => { const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio'); return a ? a.paused : null })()`)
+    const clickPlay = async () => {
+      if (await evaluate(`!!document.querySelector('[data-nm="np-play"]')`)) return clickSel('[data-nm="np-play"]')
+      return clickSel('[data-nm="player-toggle"]')
+    }
     const npLogo = await evaluate(`(() => {
       const scope = document.querySelector('[data-nm="nowplaying"]')
       let img = null
@@ -1194,31 +1522,30 @@ try {
       check('np-bg 包含当前封面 URL + blur 滤镜',
         !!npBg && npBg.hasUrl && (npBg.hasDataImage || npBg.mentionsCover) && npBg.hasBlur, JSON.stringify(npBg))
       const modeBefore = await evaluate(`(() => { const el = document.querySelector('[data-nm="np-mode"]'); return el ? el.getAttribute('data-mode') : null })()`)
-      const playBefore = await playerState()
+      const pausedBefore = await audioPaused()
       check('点击黑胶盘体', await clickSel('[data-nm="np-vinyl"]'))
       await sleep(600)
-      const playAfter = await playerState()
+      const pausedAfter = await audioPaused()
       const modeAfter = await evaluate(`(() => { const el = document.querySelector('[data-nm="np-mode"]'); return el ? el.getAttribute('data-mode') : null })()`)
-      check('点黑胶只切换播放状态（data-playing 翻转）', !!playBefore && !!playAfter && playBefore !== playAfter,
-        JSON.stringify({ playBefore, playAfter }))
+      check('点黑胶只切换播放状态（audio.paused 翻转）', pausedBefore !== null && pausedAfter !== null && pausedBefore !== pausedAfter,
+        JSON.stringify({ pausedBefore, pausedAfter }))
       check('点黑胶后仍是 vinyl 模式（不切歌词）', modeBefore === 'vinyl' && modeAfter === 'vinyl' &&
         !(await evaluate(`!!document.querySelector('[data-nm="np-lyrics"]')`)), JSON.stringify({ modeBefore, modeAfter }))
-      if (playAfter === 'false') {
+      if (pausedAfter === true) {
         await clickSel('[data-nm="np-vinyl"]')
         await sleep(500)
       }
+      const npVinylDup = await npDup()
+      check('vinyl 模式下仍只有底部 1 条进度/1 组传输键（NP 内部 0）', npVinylDup.progress === 1 && npVinylDup.plays === 1 && npVinylDup.npProgress === 0 && npVinylDup.dock === 1, JSON.stringify(npVinylDup))
       await S('13-nowplaying-vinyl-dark.png')
-      check('播放页暂停', await clickSel('[data-nm="player-toggle"]'))
+      check('播放页暂停', await clickPlay())
       try {
-        await waitFor(`(() => {
-          const st = document.querySelector('[data-nm="player-state"]') || document.querySelector('[data-nm="dock"][data-playing]')
-          return !!st && st.getAttribute('data-playing') === 'false'
-        })()`, 'paused in nowplaying', 6000)
+        await waitFor(`(() => { const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio'); return !!a && a.paused === true })()`, 'paused in nowplaying', 6000)
       } catch { /* 下面黑胶断言会暴露 */ }
       await sleep(350)
       const v1 = await evaluate(`(() => { const el = document.querySelector('[data-nm="np-vinyl"]'); return el ? { spinning: el.classList.contains('is-spinning') } : null })()`)
       check('暂停后黑胶不再旋转（无 is-spinning）', !!v1 && !v1.spinning, JSON.stringify(v1))
-      check('播放页恢复播放', await clickSel('[data-nm="player-toggle"]'))
+      check('播放页恢复播放', await clickPlay())
       try {
         await waitFor(`(() => { const el = document.querySelector('[data-nm="np-vinyl"]'); return !!el && el.classList.contains('is-spinning') })()`, 'vinyl spinning after resume', 6000)
         check('恢复播放后黑胶重新旋转', true)
@@ -1251,6 +1578,11 @@ try {
       check('切到歌词后 [data-nm="np-vinyl"] 不存在（严格互斥）',
         !(await evaluate(`!!document.querySelector('[data-nm="np-vinyl"]')`)))
       check('歌词模式下背景层仍在', await evaluate(`!!document.querySelector('[data-nm="np-bg"]')`))
+      const npLyricsDup = await npDup()
+      check('歌词模式下仍只有底部 1 条进度/1 组传输键（NP 内部 0）',
+        npLyricsDup.progress === 1 && npLyricsDup.plays === 1 && npLyricsDup.prevs === 1 && npLyricsDup.nexts === 1 &&
+        npLyricsDup.npProgress === 0 && npLyricsDup.npPlays === 0 && npLyricsDup.dock === 1,
+        JSON.stringify(npLyricsDup))
       await S('14-nowplaying-lyrics-dark.png')
       const t0 = lyr0.activeTime
       let changed = false
@@ -1289,6 +1621,10 @@ try {
       check('切回黑胶后 is-spinning 恢复', true)
     check('切回黑胶后 [data-nm="np-lyrics"] 不存在（严格互斥）',
       !(await evaluate(`!!document.querySelector('[data-nm="np-lyrics"]')`)))
+    const npBackVinylDup = await npDup()
+    check('切回黑胶后仍只有底部 1 条进度/1 组传输键',
+      npBackVinylDup.progress === 1 && npBackVinylDup.plays === 1 && npBackVinylDup.npProgress === 0 && npBackVinylDup.dock === 1,
+      JSON.stringify(npBackVinylDup))
     const vinylShape = await evaluate(`(() => {
       const vin = document.querySelector('[data-nm="np-vinyl"]')
       if (!vin) return null
@@ -1322,6 +1658,10 @@ try {
     check('盘心封面 img 圆形（border-radius 50%）',
       !!vinylShape && !!vinylShape.img && /50%/.test(vinylShape.img.radius || ''), JSON.stringify(vinylShape && vinylShape.img))
     check('圆形黑胶播放中仍在旋转', !!vinylShape && vinylShape.spinning, JSON.stringify(vinylShape && { spinning: vinylShape.spinning }))
+    check('黑胶盘心 label 直径 / 盘面直径 ≈0.58（±0.03）',
+      !!vinylShape && !!vinylShape.label && vinylShape.vinyl.w > 0 && vinylShape.label.w > 0 &&
+      Math.abs((vinylShape.label.w / vinylShape.vinyl.w) - 0.58) <= 0.03,
+      JSON.stringify({ labelW: vinylShape && vinylShape.label && vinylShape.label.w, discW: vinylShape && vinylShape.vinyl.w, ratio: vinylShape && vinylShape.label && vinylShape.vinyl ? Math.round((vinylShape.label.w / vinylShape.vinyl.w) * 1000) / 1000 : null }))
     await S('21-nowplaying-vinyl-circular.png')
     } catch (err) {
       check('切回黑胶后 is-spinning 恢复', false, String(err))
@@ -1373,6 +1713,9 @@ try {
       await waitFor(`!document.querySelector('[data-nm="nowplaying"]')`, 'back to list', 6000)
       check('返回后播放页消失', true)
       check('返回后列表仍在（曲目行 ≥1）', (await countSel('[data-nm="track"]')) >= 1, `rows=${await countSel('[data-nm="track"]')}`)
+      await sleep(300)
+      const backDup = await npDup()
+      check('返回列表后 dock 重新出现（且只有 1 条进度）', backDup.dock === 1 && backDup.progress === 1, JSON.stringify(backDup))
     } catch (err) {
       check('返回后播放页消失', false, String(err))
     }
@@ -1380,6 +1723,10 @@ try {
     try {
       await waitFor(`!!document.querySelector('[data-nm="nowplaying"]')`, 'nowplaying from dock cover', 6000)
       check('点 dock 封面进入播放页', true)
+      await sleep(300)
+      const npAgainDup = await npDup()
+      check('再次进入播放页后 dock 仍在、进度条仍只有 1 条',
+        npAgainDup.dock === 1 && npAgainDup.progress === 1 && npAgainDup.npProgress === 0, JSON.stringify(npAgainDup))
     } catch (err) {
       check('点 dock 封面进入播放页', false, String(err))
     }
@@ -1719,6 +2066,208 @@ try {
   await S('18-header-scrolled-dark.png')
   await evaluate(`(() => { const sp = document.querySelector('[data-nm="scroll"]'); if (sp) sp.scrollTop = 0; window.scrollTo(0, 0) })()`)
   await sleep(250)
+
+  console.log('\n[9d] seek：慢速 seek / 真实拖拽 / 点按 / 移出松开 / pendingSeek / 键盘')
+  // 回到列表 + 确保 dock 存在
+  await evaluate(`window.__setActivePanel('netease-music')`)
+  await sleep(250)
+  if (!(await playerVisible())) {
+    if (await clickSel('[data-nm="play-all"]')) {
+      try { await waitFor(`!!document.querySelector('[data-nm="dock"]')`, 'dock for seek tests', 8000) } catch { /* 下面断言暴露 */ }
+    }
+  }
+  const seekState = () => evaluate(`(() => {
+    const root = document.querySelector('[data-nm="player-progress"]')
+    const slider = root ? (root.matches('[role="slider"]') ? root : root.querySelector('[role="slider"]')) : null
+    const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio')
+    const r = slider ? slider.getBoundingClientRect() : null
+    const rr = root ? root.getBoundingClientRect() : null
+    return {
+      hasRoot: !!root,
+      hasSlider: !!slider,
+      left: r ? Math.round(r.left) : -1,
+      width: r ? Math.round(r.width) : -1,
+      sliderH: r ? Math.round(r.height) : -1,
+      rootH: rr ? Math.round(rr.height) : -1,
+      aria: slider ? Number(slider.getAttribute('aria-valuenow')) : null,
+      dataSeeking: root ? root.getAttribute('data-seeking') : null,
+      t: a ? Math.round(a.currentTime * 1000) / 1000 : null,
+      seekingAttr: root ? root.getAttribute('data-seeking') : null,
+      dur: a ? Math.round(a.duration * 1000) / 1000 : null,
+      paused: a ? a.paused : null,
+    }
+  })()`)
+  const ensurePaused = async () => {
+    if ((await seekState()).paused === false) {
+      await clickSel('[data-nm="player-toggle"]')
+      try { await waitFor(`(() => { const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio'); return !!a && a.paused === true })()`, 'paused for seek', 5000) } catch { /* ignore */ }
+    }
+  }
+  const dispatchPointer = (type, frac, onBody) => {
+    const buttons = type === 'pointerup' ? 0 : 1
+    return evaluate(`(() => {
+      const root = document.querySelector('[data-nm="player-progress"]')
+      const slider = root ? (root.matches('[role="slider"]') ? root : root.querySelector('[role="slider"]')) : null
+      if (!slider) return null
+      const r = slider.getBoundingClientRect()
+      const x = r.left + r.width * ${frac}
+      const y = r.top + Math.min(r.height / 2, 11)
+      const node = ${onBody ? 'document.body' : 'slider'}
+      node.dispatchEvent(new PointerEvent('${type}', {
+        bubbles: true, cancelable: true, clientX: x, clientY: y,
+        pointerId: 1, isPrimary: true, pointerType: 'mouse',
+        button: 0, buttons: ${buttons},
+      }))
+      return { x: Math.round(x), y: Math.round(y), width: Math.round(r.width), left: Math.round(r.left) }
+    })()`)
+  }
+  const seekRatioTo = async (frac) => { await dispatchPointer('pointerdown', frac, false); await sleep(70); await dispatchPointer('pointerup', frac, false); await sleep(900) }
+
+  const s0 = await seekState()
+  check('列表 dock 存在 [data-nm="player-progress"]', s0.hasRoot && s0.hasSlider, JSON.stringify(s0))
+  check('进度条命中高度 ≥20px', s0.rootH >= 20 || s0.sliderH >= 20, JSON.stringify({ rootH: s0.rootH, sliderH: s0.sliderH }))
+  await ensurePaused()
+
+  // 1) 慢速 seek：Range 延迟 1200ms，松手后不能被旧 position 覆盖
+  // 先切一首新歌（server 在 slowSeekMs>0 时把首个响应裁成 1/4，强制后续 Range 请求）
+  await config({ slowSeekMs: 1200 })
+  await clickSel('[data-nm="player-next"]')
+  try { await waitFor(`(() => { const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio'); return !!a && Number.isFinite(a.duration) && a.duration > 0 })()`, 'slow test metadata', 8000) } catch { /* ignore */ }
+  await sleep(250)
+  await ensurePaused()
+  await dispatchPointer('pointerdown', 0.7, false)
+  let duringSeek = null
+  for (let i = 0; i < 12; i++) {
+    await sleep(40)
+    const st = await seekState()
+    if (st.dataSeeking === 'true') { duringSeek = st; break }
+  }
+  await dispatchPointer('pointerup', 0.7, false)
+  await sleep(220)
+  const slowEarly = await seekState()
+  check('慢速 seek：松手 250ms 内 aria-valuenow 未回落到 <10',
+    slowEarly.aria != null && slowEarly.aria >= 10, JSON.stringify({ early: slowEarly }))
+  check('慢速 seek：拖动/请求期间 data-seeking="true"',
+    !!duringSeek, JSON.stringify({ during: duringSeek, afterUp: slowEarly }))
+  await sleep(2300)
+  const slowLate = await seekState()
+  check('慢速 seek 完成后进度显示 ≈70%（±5）',
+    slowLate.aria != null && Math.abs(slowLate.aria - 70) <= 5, JSON.stringify(slowLate))
+  check('慢速 seek 完成后 audio.currentTime ≈ 70% 时长（±8%）',
+    slowLate.t != null && slowLate.dur > 0 && Math.abs(slowLate.t - slowLate.dur * 0.7) <= Math.max(0.8, slowLate.dur * 0.08),
+    JSON.stringify({ t: slowLate.t, target: slowLate.dur && slowLate.dur * 0.7 }))
+  await sleep(700)
+  const slowLate2 = await seekState()
+  check('seek 完成后 0.7s 内不被旧 timeupdate 拉回（仍 ≈70%）',
+    slowLate2.aria != null && Math.abs(slowLate2.aria - 70) <= 6, JSON.stringify(slowLate2))
+  check('seek 完成后 data-seeking="false"',
+    slowLate2.dataSeeking === 'false', JSON.stringify({ dataSeeking: slowLate2.dataSeeking }))
+  await config({ slowSeekMs: 0 })
+
+  // 2) 真实时序拖拽：down → 50% → 70% → up
+  await ensurePaused()
+  await dispatchPointer('pointerdown', 0.2, false)
+  await sleep(120)
+  await dispatchPointer('pointermove', 0.5, false)
+  await sleep(120)
+  await dispatchPointer('pointermove', 0.7, false)
+  await sleep(120)
+  await dispatchPointer('pointerup', 0.7, false)
+  await sleep(900)
+  const dragRes = await seekState()
+  check('真实时序拖拽到 70% 后 audio.currentTime ≈ 70% 时长（±8%）',
+    dragRes.t != null && dragRes.dur > 0 && Math.abs(dragRes.t - dragRes.dur * 0.7) <= Math.max(0.8, dragRes.dur * 0.08),
+    JSON.stringify({ t: dragRes.t, target: dragRes.dur && dragRes.dur * 0.7 }))
+
+  // 3) 点按跳转：rail 中点 down+up → ≈50%
+  await ensurePaused()
+  await dispatchPointer('pointerdown', 0.5, false)
+  await sleep(80)
+  await dispatchPointer('pointerup', 0.5, false)
+  await sleep(900)
+  const clickRes = await seekState()
+  check('点按进度条中点后 audio.currentTime ≈ 50% 时长（±8%）',
+    clickRes.t != null && clickRes.dur > 0 && Math.abs(clickRes.t - clickRes.dur * 0.5) <= Math.max(0.8, clickRes.dur * 0.08),
+    JSON.stringify({ t: clickRes.t, target: clickRes.dur && clickRes.dur * 0.5 }))
+
+  // 4) 移出元素后松开：pointerup 派发到 document.body 仍应提交（window 级监听）
+  await ensurePaused()
+  await dispatchPointer('pointerdown', 0.2, false)
+  await sleep(150)
+  await dispatchPointer('pointermove', 0.3, false)
+  await sleep(120)
+  await dispatchPointer('pointerup', 0.3, true)
+  await sleep(900)
+  const bodyUpRes = await seekState()
+  check('pointerup 移出到 body 后仍提交 seek（currentTime ≈30% 时长 ±8%）',
+    bodyUpRes.t != null && bodyUpRes.dur > 0 && Math.abs(bodyUpRes.t - bodyUpRes.dur * 0.3) <= Math.max(0.8, bodyUpRes.dur * 0.08),
+    JSON.stringify({ t: bodyUpRes.t, target: bodyUpRes.dur && bodyUpRes.dur * 0.3 }))
+
+  // 5) pendingSeek：metadata 迟到时拖拽，metadata 到达后应 seek 到目标
+  await config({ slowAudioMs: 1600 })
+  const oldSrc = await evaluate(`(() => { const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio'); return a ? (a.getAttribute('src') || '') : null })()`)
+  await clickSel('[data-nm="player-next"]')
+  try {
+    await waitFor(`(() => {
+      const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio')
+      return !!a && (a.getAttribute('src') || '') !== ${JSON.stringify(oldSrc)}
+    })()`, 'new audio src for pendingSeek', 5000)
+  } catch { /* 下面断言暴露 */ }
+  await dispatchPointer('pointerdown', 0.6, false)
+  await sleep(60)
+  await dispatchPointer('pointerup', 0.6, false)
+  try {
+    // 等 metadata 真正到达并应用 pendingSeek：currentTime 应从 0 跳到 ~60%（旧 metadata 不算）
+    await waitFor(`(() => {
+      const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio')
+      return !!a && Number.isFinite(a.duration) && a.duration > 0 && a.currentTime > 2
+    })()`, 'pendingSeek applied after metadata', 9000)
+    await clickSel('[data-nm="player-toggle"]')
+    await sleep(500)
+    const pendingRes = await seekState()
+    check('metadata 迟到 + 拖拽：pendingSeek 在 metadata 到达后生效（≈60% ±10%）',
+      pendingRes.t != null && pendingRes.dur > 0 && Math.abs(pendingRes.t - pendingRes.dur * 0.6) <= Math.max(1, pendingRes.dur * 0.1),
+      JSON.stringify({ t: pendingRes.t, dur: pendingRes.dur, target: pendingRes.dur && pendingRes.dur * 0.6 }))
+  } catch (err) {
+    const st = await seekState()
+    check('metadata 迟到 + 拖拽：pendingSeek 在 metadata 到达后生效（≈60% ±10%）', false,
+      'metadata 到达后 currentTime 未跳到目标: ' + JSON.stringify(st))
+  }
+  await config({ slowAudioMs: 0 })
+
+  // 6) 键盘：ArrowRight / Home / End
+  await ensurePaused()
+  const sliderInfo = await evaluate(`(() => {
+    const root = document.querySelector('[data-nm="player-progress"]')
+    const slider = root ? (root.matches('[role="slider"]') ? root : root.querySelector('[role="slider"]')) : null
+    if (!slider) return null
+    slider.focus()
+    return { tag: slider.tagName, tabIndex: slider.tabIndex, aria: Number(slider.getAttribute('aria-valuenow')) }
+  })()`)
+  check('进度条 slider 可聚焦（tabIndex ≥0）', !!sliderInfo && sliderInfo.tabIndex >= 0, JSON.stringify(sliderInfo))
+  await seekRatioTo(0.2)
+  const kbBase = await seekState()
+  await evaluate(`(() => { const root = document.querySelector('[data-nm="player-progress"]'); const el = root && (root.matches('[role="slider"]') ? root : root.querySelector('[role="slider"]')); if (el) { el.focus(); el.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true })) } })()`)
+  await sleep(600)
+  const kbRight = await seekState()
+  check('键盘 ArrowRight 生效（currentTime 增加）',
+    kbRight.t != null && kbBase.t != null && kbRight.t > kbBase.t + 0.05,
+    JSON.stringify({ before: kbBase.t, after: kbRight.t }))
+  await evaluate(`(() => { const root = document.querySelector('[data-nm="player-progress"]'); const el = root && (root.matches('[role="slider"]') ? root : root.querySelector('[role="slider"]')); if (el) { el.focus(); el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true })) } })()`)
+  await sleep(600)
+  const kbHome = await seekState()
+  check('键盘 Home 生效（currentTime 回到开头）', kbHome.t != null && kbHome.t < 0.8, JSON.stringify({ t: kbHome.t }))
+  await evaluate(`(() => { const root = document.querySelector('[data-nm="player-progress"]'); const el = root && (root.matches('[role="slider"]') ? root : root.querySelector('[role="slider"]')); if (el) { el.focus(); el.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true })) } })()`)
+  await sleep(180)
+  const kbEnd = await seekState()
+  check('键盘 End 生效（跳到结尾附近）',
+    kbEnd.t != null && kbEnd.dur > 0 && (kbEnd.t > kbEnd.dur * 0.85 || (kbEnd.aria != null && kbEnd.aria >= 95)),
+    JSON.stringify({ t: kbEnd.t, dur: kbEnd.dur, aria: kbEnd.aria }))
+  // 恢复播放，避免影响后续运行期检查
+  if ((await seekState()).paused === true) {
+    await clickSel('[data-nm="player-toggle"]')
+    await sleep(300)
+  }
 
   console.log('\n[8] 运行期错误')
   const realErrors = errors.filter((e) => !/favicon|ERR_ABORTED/.test(e))

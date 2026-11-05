@@ -11,10 +11,11 @@
 ## 功能
 
 - **官方红标**：左侧栏入口、面板左上角、插件管理页统一使用网易云官方红底白音符图标（22px）。
+- **首页「听歌模式」大 banner 轮播**：心动模式 / 漫游·私人FM / 相似歌曲 / 相似艺人 / 每日推荐 五张卡，左右无缝循环（6s 自动 + 箭头/滑动 + 悬停暂停），点一下就直接开播；接口不可用时自动降级并提示。
 - **全屏播放页（黑胶 / 歌词 严格互斥）**
-  - 黑胶模式：整页封面模糊背景 + 正圆黑胶旋转（可点唱片暂停/播放），不显示歌词卡。
+  - 黑胶模式：整页封面模糊背景 + 正圆黑胶旋转（盘心封面 58%，黑圈变细），可点唱片暂停/播放，不显示歌词卡。
   - 歌词模式：全屏大字号滚动歌词，当前行品牌红高亮、自动居中、点任意行跳唱、翻译副行；不显示黑胶。
-  - 右上角「黑胶 / 歌词」一键切换并记住偏好；返回或 Esc 退出不中断播放。
+  - 底部保留整条工具栏（封面/歌名/上一首/播放/下一首/可拖拽进度条/音量/音质/队列），播放页内不再重复第二条进度条；右上角「黑胶 / 歌词」切换并记住偏好；返回或 Esc 退出不中断播放。
 - **音质可调**：自动 / 标准 / 较高 / 极高 / 无损 / Hi-Res，切换时保持播放进度；显示实际码率与「试听」标记（会员账号实测无损 FLAC 1.5 Mbps）。
 - **播放条不挡工作区**
   - 在网易云面板里：页面底部内嵌一条 dock（占自己的布局行，不遮列表、不悬浮）。
@@ -117,30 +118,14 @@ Host 侧支持环境变量（一般不需要）：
 - 侧栏图标：官方网易云红底白色音符标志，128px PNG 内联为 dataURL（`client.js` 的 `ICON_DATA`），深/浅色都保持红色；插件管理页图标为 `assets/icon.png`。
 
 ![侧栏图标（深色）](docs/sidebar-icon-dark.png)
-![侧栏图标（浅色）](docs/sidebar-icon-light.png)
-![首页（深色）](docs/screenshot-home-dark.png)
-![黑胶播放页](docs/screenshot-nowplaying-vinyl.png)
+![首页轮播·心动模式](docs/screenshot-hero-carousel.png)
+![轮播绕回动画](docs/screenshot-carousel-wrap.png)
+![黑胶播放页（底部工具栏 + 58% 盘心）](docs/screenshot-nowplaying-with-dock.png)
 ![歌词播放页](docs/screenshot-nowplaying-lyrics.png)
-![播放页（浅色）](docs/screenshot-nowplaying-light.png)
-![面板内底部 dock](docs/screenshot-inpanel-dock.png)
 ![对话框左侧栏迷你播放器](docs/screenshot-mini-sidebar.png)
-![侧栏收起为 56px 时的迷你按钮](docs/screenshot-mini-rail.png)
+![侧栏收起为 56px 的迷你按钮](docs/screenshot-mini-rail.png)
 ![滚动后贴顶的不透明标题栏](docs/screenshot-header-scrolled.png)
 ![引擎无感安装](docs/screenshot-install-progress.png)
-
-## Windows 支持
-
-插件本身是「浏览器 UI + Node Host + Python 引擎」，同一套代码两个平台通用，已做跨平台处理：
-
-- venv 解释器：macOS/Linux `.venv/bin/python`，Windows `.venv/Scripts/python.exe`（Host 自动判断）。
-- 自动安装器：Windows 会找 `uv.exe`（`%USERPROFILE%\.local\bin`、`%LOCALAPPDATA%\Programs\uv`、WinGet Links 等）、用 `where uv`，
-  venv 里用 `pip.exe`；没有 uv 时退回系统 `python.exe`（需要 3.10+）。
-- 音频/图片代理、REST 路由、播放器逻辑都不依赖平台。
-- `cordis.patch.yml` 里 `netease-mcp` 的 `command` 是**绝对路径**，Windows 上改成：
-  `...\dsh-netease-music\engine\cloud-music-mcp\.venv\Scripts\cloud-music-mcp.exe`
-  （装好引擎后，`GET /netease-panel/api/status` 的 `mcpEntry` 字段会给出本机正确路径；不想要 Agent 工具也可以直接删掉这一行，面板功能不受影响）。
-
-> 说明：本项目在 macOS 上开发和验收；Windows 的布局差异（顶栏 caption 高度通过 `--dsh-frame-top-clearance` 自适应、侧栏 footer 槽位）逻辑上兼容，但尚未在 Windows 真机跑过，首次使用如遇留白/对齐问题请提 issue。
 
 ## 已知局限
 

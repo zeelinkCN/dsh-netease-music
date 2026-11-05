@@ -387,3 +387,38 @@ harness 的 mock 服务必须与第 5 节路由/信封完全一致；`/audio` �
 
 ### 11.5 新增 harness 钩子/断言
 见 §10.5 基础上：`mini-player/mini-cover/mini-toggle`、面板内 `dock`、header 吸顶不透明、黑胶圆形、安装流程状态机。
+
+## 12. v4 需求（用户第四轮反馈，2026-11-06）
+
+### 12.1 全屏播放页：保留下方整条工具栏（撤销 §11 的“播放页隐藏 dock”）
+- 进入 Now Playing 后，**面板内底部 dock（`data-nm="dock"`）继续显示**：封面 + 歌名/歌手 + 上一首/播放/下一首 + 可拖拽进度条 + 音量 + 音质 + 队列。
+- 播放页自身**不再渲染第二条进度条与第二组传输键**（黑胶/歌词区域只保留视觉 + 顶部返回/模式切换）；全页进度条数量必须恰好为 1（即 dock 里那条）。
+- 播放页内部可保留：返回、黑胶/歌词切换、标题信息。
+
+### 12.2 黑胶盘心放大
+- 盘心封面 label 直径从盘面 35% → **58%**（黑圈变细），保持正圆、clip-path 圆形、播放时旋转。
+
+### 12.3 首页大 banner → 听歌模式轮播
+- 首页最上方 hero 改为横向轮播，卡片 5 张（顺序）：
+  1. 心动模式（around current song）
+  2. 漫游 / 私人 FM
+  3. 相似歌曲（以当前歌曲为种子）
+  4. 相似艺人（以当前歌曲的歌手为种子）
+  5. 每日推荐
+- 交互：自动轮播 6s + 左右箭头/触摸横向滑动可手动切换，鼠标悬停暂停；点卡片 = 生成歌单并**直接开始播放**。
+- 种子：优先当前正在播放的歌曲（及其歌手）；没有在播则用「今日推荐第一首」（及其歌手）。
+- 钩子：`data-nm="hero-carousel"`、`data-nm="carousel-card"`+`data-mode="heart|roam|similar_song|similar_artist|daily"`、`data-nm="carousel-prev"`、`data-nm="carousel-next"`、`data-nm="carousel-dot"`。
+
+### 12.4 后端：`mode` 命令与路由
+bridge 新增命令 `mode`：
+- params：`{type:'heart'|'roam'|'similar_song'|'similar_artist'|'daily', seedSongId?, seedArtistId?, limit?}`
+- data：`{type, title, subtitle, resolvedSeed:{songId?,artistId?}, fallbackUsed?:string|null, songs: Track[]}`
+- 各模式建议接口（bridge 负责验证 + 兜底）：
+  - heart：`/weapi/playmode/intelligence/list`（失败降级 `/weapi/v1/discovery/simiSong` + 推荐混合，并标 fallbackUsed）
+  - roam：`/weapi/v1/radio/get`
+  - similar_song：`/weapi/v1/discovery/simiSong`
+  - similar_artist：`/weapi/discovery/simiArtist` → 取相似艺人热门歌（或第一位艺人的热门歌）
+  - daily：复用现有每日推荐
+- 失败时返回 `{songs: [], fallbackUsed: null, error}` 由 Host 透传，UI 提示。
+
+Host 新增路由：`GET /netease-panel/api/mode?type=&songId=&artistId=&limit=`（缓存 5 分钟），信封同 §5。
