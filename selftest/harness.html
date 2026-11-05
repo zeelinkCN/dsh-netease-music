@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>netease-music client harness</title>
+  <style>
+    /* ------------------------------------------------------------------
+     * DSH 主题 token 的离线快照（light 默认，dark 走 prefers-color-scheme）
+     * 取值来自 Harness 主题定义：neutral-bluish 色阶 + 语义别名
+     * ------------------------------------------------------------------ */
+    :root {
+      color-scheme: light;
+      --dsw-alias-bg-base: #ffffff;
+      --dsw-alias-bg-layer-1: #ffffff;
+      --dsw-alias-bg-layer-2: #ffffff;
+      --dsw-alias-bg-layer-3: #f9fafb;
+      --dsw-alias-bg-overlay: #ffffff;
+      --dsw-alias-bg-skeleton: rgba(0, 0, 0, .06);
+      --dsw-alias-bg-mask-drop: #272730b3;
+      --dsw-alias-label-primary: #0f1115;
+      --dsw-alias-label-secondary: #61666b;
+      --dsw-alias-label-tertiary: #81858c;
+      --dsw-alias-label-caption: #81858c;
+      --dsw-alias-label-primary-inverted: #353638;
+      --dsw-alias-border-l1: rgba(0, 0, 0, .04);
+      --dsw-alias-border-l2: rgba(0, 0, 0, .1);
+      --dsw-alias-border-l3: rgba(0, 0, 0, .16);
+      --dsw-alias-border-l4: rgba(0, 0, 0, .2);
+      --dsw-alias-brand-primary: #4d6bfe;
+      --dsw-alias-state-success-primary: #22c55e;
+      --dsw-alias-state-warn-primary: #f59e0b;
+      --dsw-alias-state-error-primary: #ec1313;
+      --dsw-alias-fill-tertiary: rgba(0, 0, 0, .08);
+      --dsw-alias-interactive-bg-hover: rgba(0, 0, 0, .05);
+      --dsw-alias-interactive-bg-hover-solid: #f1f3f5;
+      --dsw-alias-button-primary-fill: #4d6bfe;
+      --dsw-alias-button-primary-hover: #353638;
+      --dsw-specific-sidebar-fill: #f9fafb;
+      --dsw-specific-input-major: #ffffff;
+      --dsh-frame-top-clearance: 20px;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        color-scheme: dark;
+        --dsw-alias-bg-base: #151517;
+        --dsw-alias-bg-layer-1: #232324;
+        --dsw-alias-bg-layer-2: #2c2c2e;
+        --dsw-alias-bg-layer-3: #353638;
+        --dsw-alias-bg-overlay: #2c2c2e;
+        --dsw-alias-bg-skeleton: rgba(255, 255, 255, .08);
+        --dsw-alias-bg-mask-drop: #272730b3;
+        --dsw-alias-label-primary: #f9fafb;
+        --dsw-alias-label-secondary: #cfd3d6;
+        --dsw-alias-label-tertiary: #adb2b8;
+        --dsw-alias-label-caption: #81858c;
+        --dsw-alias-label-primary-inverted: #2c2c2e;
+        --dsw-alias-border-l1: rgba(255, 255, 255, .06);
+        --dsw-alias-border-l2: rgba(255, 255, 255, .12);
+        --dsw-alias-border-l3: rgba(255, 255, 255, .16);
+        --dsw-alias-border-l4: rgba(255, 255, 255, .2);
+        --dsw-alias-brand-primary: #4d6bfe;
+        --dsw-alias-state-success-primary: #22c55e;
+        --dsw-alias-state-warn-primary: #f59e0b;
+        --dsw-alias-state-error-primary: #f25a5a;
+        --dsw-alias-fill-tertiary: rgba(255, 255, 255, .08);
+        --dsw-alias-interactive-bg-hover: rgba(255, 255, 255, .08);
+        --dsw-alias-interactive-bg-hover-solid: #353638;
+        --dsw-alias-button-primary-fill: #4d6bfe;
+        --dsw-alias-button-primary-hover: #ebeef2;
+        --dsw-specific-sidebar-fill: #1b1b1c;
+        --dsw-specific-input-major: #232324;
+      }
+    }
+
+    html, body, #app { height: 100%; margin: 0; }
+    body {
+      background: var(--dsw-alias-bg-base);
+      color: var(--dsw-alias-label-primary);
+      font-family: -apple-system, "SF Pro Display", "PingFang SC", "Helvetica Neue", sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    /* 模拟 DSH 三栏 + root 级底部槽：shell.bottom 的内容会压缩 #body 高度 */
+    #app { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
+    #body { flex: 1 1 auto; min-height: 0; display: flex; overflow: hidden; }
+    /* 模拟 DSH 左侧栏，只为挂载 sidebar.panellist 图标 */
+    #rail {
+      width: 56px; flex: none;
+      background: var(--dsw-specific-sidebar-fill);
+      border-right: 1px solid var(--dsw-alias-border-l1);
+      display: flex; flex-direction: column; align-items: center;
+      padding-top: 52px; gap: 8px;
+    }
+    #rail-brand {
+      width: 26px; height: 26px; border-radius: 8px; margin-bottom: 10px;
+      background: color-mix(in srgb, var(--dsw-alias-label-primary) 10%, transparent);
+    }
+    #sidebar-icon { display: grid; place-items: center; }
+    #main { flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; flex-direction: column; position: relative; }
+    #root { flex: 1 1 auto; min-height: 0; height: auto; }
+    /* 假 DSH 输入框：dock 停靠时应被顶上去而不是被遮挡 */
+    #composer {
+      flex: none; height: 64px; box-sizing: border-box;
+      display: flex; align-items: center; gap: 10px; padding: 0 22px;
+      background: var(--dsw-alias-bg-layer-1);
+      border-top: 1px solid var(--dsw-alias-border-l2);
+    }
+    #composer .composer-input {
+      flex: 1 1 auto; height: 38px; min-width: 0; box-sizing: border-box;
+      display: flex; align-items: center; padding: 0 14px;
+      border: 1px solid var(--dsw-alias-border-l2); border-radius: 12px;
+      background: var(--dsw-specific-input-major);
+      color: var(--dsw-alias-label-tertiary); font-size: 13px;
+    }
+    #composer .composer-send {
+      flex: none; width: 32px; height: 32px; border-radius: 999px;
+      background: var(--dsw-alias-label-primary); color: var(--dsw-alias-bg-base);
+      display: grid; place-items: center; font-size: 15px; font-weight: 700;
+    }
+    /* shell.bottom 的内容（dock）占一行高度；空内容高度为 0 */
+    #bottom-root { flex: none; width: 100%; }
+    #overlay-root { position: fixed; inset: 0; pointer-events: none; z-index: 60; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div id="body">
+      <div id="rail">
+        <div id="rail-brand"></div>
+        <div id="sidebar-icon"></div>
+      </div>
+      <div id="main">
+        <div id="root"></div>
+        <div id="composer" aria-hidden="true">
+          <div class="composer-input">给 DeepSeek 发消息…（harness 假输入框，验证 dock 不遮挡）</div>
+          <div class="composer-send">↑</div>
+        </div>
+      </div>
+    </div>
+    <div id="bottom-root"></div>
+  </div>
+  <div id="overlay-root"></div>
+
+  <!-- React 18 UMD（离线保存于 assets/，与 garmin-panel-selftest 同一份） -->
+  <script src="/react.js"></script>
+  <script src="/react-dom.js"></script>
+  <script>
+    /* ------------------------------------------------------------------
+     * 验收脚手架：捕获三个 slot 注册 + 假 locale/layout/effect
+     * 只认 CONTRACT.md 第 9 节的 data-nm 钩子，不依赖 class 名
+     * ------------------------------------------------------------------ */
+    window.__slots = { main: null, 'sidebar.panellist': null, 'shell.bottom': null, 'shell.overlay': null };
+    window.__slotSpecs = {};
+    window.__disposers = [];
+    window.__selectedPanels = [];
+    window.__localeRegistered = {};
+    window.__lang = 'zh';
+    window.__mountError = null;
+    // ?shellBottom=throw 模拟 shell.bottom 被其它插件占用（验证 client 回退 shell.overlay）
+    window.__shellBottomMode = new URLSearchParams(location.search).get('shellBottom') || 'ok';
+    window.__slotRender = null;
+
+    window.__logError = function (err) {
+      const text = String((err && (err.stack || err.message)) || err);
+      (window.__errors = window.__errors || []).push(text);
+      console.error(text);
+    };
+
+    window.__ModuleLoader__ = {
+      load: function (entry) {
+        window.__pluginEntry = entry;
+        try {
+          window.__plugin = entry.factory(function require(name) {
+            if (name === 'react') return window.React;
+            if (name === 'react-dom') return window.ReactDOM;
+            throw new Error('unexpected require: ' + name);
+          });
+        } catch (err) {
+          window.__mountError = 'factory 抛错: ' + ((err && (err.stack || err.message)) || err);
+          window.__logError(err);
+        }
+      }
+    };
+
+    function createCtx() {
+      const localeStore = window.__localeRegistered; // ns -> { zh, en }
+      const listeners = [];
+      const lang = () => window.__lang;
+      function lookup(ns, key) {
+        const dict = localeStore[ns] || {};
+        const exact = (dict[lang()] || {})[key];
+        if (exact != null) return exact;
+        const zh = (dict.zh || {})[key];
+        if (zh != null) return zh;
+        for (const k of Object.keys(dict)) {
+          const v = (dict[k] || {})[key];
+          if (v != null) return v;
+        }
+        return undefined;
+      }
+      function makeT(ns) {
+        return function t(key, vars) {
+          let s = lookup(ns, key);
+          if (s == null) return undefined;
+          if (typeof s === 'string' && vars && typeof vars === 'object') {
+            s = s.replace(/\{(\w+)\}/g, function (m, k) {
+              return vars[k] == null ? m : String(vars[k]);
+            });
+          }
+          return s;
+        };
+      }
+      const locale = {
+        get current() { return lang(); },
+        get locale() { return lang(); },
+        get lang() { return lang(); },
+        register: function (ns, a, b) {
+          if (a && typeof a === 'object') {
+            // register(ns, { zh, en })
+            localeStore[ns] = localeStore[ns] || {};
+            for (const code of Object.keys(a)) {
+              localeStore[ns][code] = Object.assign({}, localeStore[ns][code], a[code]);
+            }
+          } else if (typeof a === 'string' && b && typeof b === 'object') {
+            // register(ns, 'zh', {...})
+            localeStore[ns] = localeStore[ns] || {};
+            localeStore[ns][a] = Object.assign({}, localeStore[ns][a], b);
+          }
+          listeners.forEach(function (fn) { try { fn() } catch (_) {} });
+          return function () {};
+        },
+        bind: function (ns) { return makeT(ns || 'netease-music'); },
+        t: function (a, b, c) {
+          if (typeof b === 'string') return makeT(a)(b, c);
+          return makeT('netease-music')(a, b);
+        },
+        subscribe: function (fn) { listeners.push(fn); return function () {}; },
+        setLocale: function (l) { window.__lang = l; listeners.forEach(function (fn) { try { fn() } catch (_) {} }); }
+      };
+
+      const slots = {
+        inject: function (name, factory) {
+          if (name === 'shell.bottom' && window.__shellBottomMode === 'throw') {
+            throw new Error('harness: shell.bottom 已被占用（模拟 single 槽冲突）');
+          }
+          return factory();
+        },
+        register: function (spec, comp) {
+          if (!spec || !spec.name) throw new Error('slots.register 需要 { name }');
+          window.__slots[spec.name] = comp;
+          window.__slotSpecs[spec.name] = spec;
+          return function () { window.__slots[spec.name] = null; };
+        }
+      };
+
+      const layout = {
+        get panel() { return 'netease-music'; },
+        selectPanel: function (id) { window.__selectedPanels.push(id); return true; },
+        openPanel: function (id) { return this.selectPanel(id); },
+        focusPanel: function (id) { return this.selectPanel(id); },
+        getState: function () { return { panel: 'netease-music' }; }
+      };
+
+      const ctx = {
+        effect: function (fn) {
+          const d = fn();
+          if (typeof d === 'function') window.__disposers.push(d);
+          return d;
+        },
+        get: function () { return undefined; },
+        slots: slots,
+        locale: locale,
+        layout: layout,
+        logger: { info: function () {}, warn: function () {}, error: function () {} },
+        webServer: { register: function () { return function () {}; } },
+        remote: { session: { prompt: function () { return Promise.resolve({ ok: true }); } } }
+      };
+      window.__ctx = ctx;
+      return ctx;
+    }
+
+    window.__unmount = function () {
+      for (const d of window.__disposers.splice(0)) {
+        try { if (typeof d === 'function') d(); } catch (_) {}
+      }
+      for (const key of ['root', 'sidebar', 'bottom', 'overlay']) {
+        try { if (window['__root_' + key]) window['__root_' + key].unmount(); } catch (_) {}
+      }
+    };
+
+    window.__mount = function () {
+      window.__mountError = null;
+      if (!window.__plugin) {
+        window.__mountError = 'window.__plugin 未创建（client.js 未加载或 factory 抛错）';
+        window.__logError(window.__mountError);
+        return false;
+      }
+      try {
+        const plugin = window.__plugin;
+        const ctx = createCtx();
+        plugin.apply(ctx);
+      } catch (err) {
+        window.__mountError = 'apply 抛错: ' + ((err && (err.stack || err.message)) || err);
+        window.__logError(err);
+        return false;
+      }
+      const main = window.__slots['main'];
+      const icon = window.__slots['sidebar.panellist'];
+      const bottom = window.__slots['shell.bottom'];
+      const overlay = window.__slots['shell.overlay'];
+      if (!main) {
+        window.__mountError = 'main slot 未注册';
+        window.__logError(window.__mountError);
+        return false;
+      }
+      try {
+        window.__root_root = ReactDOM.createRoot(document.getElementById('root'));
+        window.__root_root.render(React.createElement('div', { style: { height: '100%' } }, React.createElement(main, {})));
+        if (icon) {
+          window.__root_sidebar = ReactDOM.createRoot(document.getElementById('sidebar-icon'));
+          window.__root_sidebar.render(React.createElement('div', { style: { width: 34, height: 34, display: 'grid', placeItems: 'center', borderRadius: 10, background: 'color-mix(in srgb, currentColor 9%, transparent)' } }, React.createElement(icon, { size: 20, active: true })));
+        }
+        if (bottom) {
+          // 停靠：渲染到 root 级底部槽，压缩 #body 高度（输入框被顶上去）
+          window.__root_bottom = ReactDOM.createRoot(document.getElementById('bottom-root'));
+          window.__root_bottom.render(React.createElement(bottom, {}));
+          window.__slotRender = { bottom: true, overlay: false };
+        } else if (overlay) {
+          // 回退：旧悬浮模式
+          window.__root_overlay = ReactDOM.createRoot(document.getElementById('overlay-root'));
+          window.__root_overlay.render(React.createElement(overlay, {}));
+          window.__slotRender = { bottom: false, overlay: true };
+        } else {
+          window.__slotRender = { bottom: false, overlay: false };
+        }
+      } catch (err) {
+        window.__mountError = 'mount 抛错: ' + ((err && (err.stack || err.message)) || err);
+        window.__logError(err);
+        return false;
+      }
+      window.__mounted = true;
+      return true;
+    };
+
+    window.addEventListener('error', function (e) { window.__logError(e.error || e.message); });
+    window.addEventListener('unhandledrejection', function (e) { window.__logError(e.reason); });
+  </script>
+  <script src="/client.js"></script>
+  <script>
+    (function () {
+      if (!window.__plugin && !window.__mountError) {
+        window.__mountError = 'client.js 没有调用 window.__ModuleLoader__.load';
+        console.error(window.__mountError);
+      }
+      if (window.__plugin) window.__mount();
+    })();
+  </script>
+</body>
+</html>

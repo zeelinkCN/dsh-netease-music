@@ -1,0 +1,115 @@
+# netease-panel 离线验收（verify）
+
+只验证 `dsh-netease-music/client.js`（不启动真实 host / bridge / 网易云 / LLM）。
+真实 Chrome headless + React 18 UMD + 真实 client.js，后端全部走本地 mock。
+
+## 运行
+
+```bash
+NODE="/Applications/DeepSeek Harness.app/Contents/Resources/runtime/primary-runtime/dependencies/node/bin/node"
+cd netease-panel-selftest
+"$NODE" run.mjs            # 验收 dsh-netease-music/client.js（不存在时退出码 2）
+"$NODE" run.mjs; echo $?   # 0 = 全绿；1 = 有 FAIL；2 = client.js 未交付；3 = 无 Chrome；4 = watchdog
+```
+
+- 只写本目录：`shots/`（每次运行前清空）、`tmp/`（Chrome profile / 临时日志，结束清理）。
+  不写 `~/.dsh`、不改插件源码。
+- 每次运行输出 PASS/FAIL 清单、截图路径，并落盘 `last-run.log`（含页面 console 错误原文）。
+
+## 文件
+
+| 文件 | 作用 |
+| --- | --- |
+| `server.mjs` | 静态服务 + 全部 `/netease-panel/api/*` mock，严格按 CONTRACT 第 5 节信封 |
+| `harness.html` | React 18 UMD + `__ModuleLoader__` stub + 假 ctx（捕获 main / sidebar.panellist / shell.bottom / shell.overlay）+ 假三栏布局与底部输入框占位（shell.bottom 会压缩主区高度）+ DSH token 主题快照（light/dark 走 `prefers-color-scheme`） |
+| `run.mjs` | headless Chrome CDP 驱动：截图 + 脚本化断言 + PASS/FAIL 清单 |
+| `assets/react.js` `assets/react-dom.js` | 离线 React 18 production UMD（与 garmin-panel-selftest 同一份） |
+| `shots/*.png` | 验收截图（见下） |
+| `last-run.log` | 最近一次运行的完整结果 |
+
+## mock 数据 / 能力
+
+- `/home`：`daily=30`、`recommended=18` 张歌单、`playlists/artists` 按登录态返回（未登录为空，贴真实 bridge 行为）。
+- 歌单/专辑/歌手/搜索/歌词/`subscriptions`：契约 4.2 归一化形状；缺失字段为 `null`。
+- 第一个推荐歌单是长列表（mock 详情 120 首，验证 100 行分页 + 「加载更多」）。
+- 封面 = 本地生成的渐变 SVG data URL（离线、可截图）；封面缺失的曲目/歌手用于验证占位。
+- `/audio` = **8s** 22050Hz mono PCM 正弦波 WAV，支持 `Range` / `206` / `Content-Range`，并按 `?level=` 回 `X-NM-Level` / `X-NM-Br` 头；
+  client 的 `<audio src=/netease-panel/api/audio?...>` 可直接播放、推进 `currentTime`，并在 ended 后自动下一首。
+- `/lyrics`：14 行密集时间戳 LRC（0–18.2s，每 1.4s 一行）+ `[ti:]/[ar:]/[al:]` 元数据头（非时间戳，UI 应过滤）+ `tlyric` 前 6 行翻译，用于验证歌词高亮/点击跳播。
+- `/song/url?level=`：`auto→exhigh/320000`、`standard/128000`、`exhigh/320000`、`lossless/1512987`、`hires/1512987`；`trial` 可用 `/__config {trial:true}` 打开。
+- `/img?u=` 返回本地 SVG 兜底（client 封面失败 fallback 用）。
+- `/login/start` 返回固定 QR SVG data URL；`/login/check` 第 1、2 次 `waiting`、第 3 次 `scanned`、第 4 次 `ok`（契约第 9 节）。
+- 控制面：`POST /__config`（`authed` / `bridge:'ready'|'starting'|'error'` / `errorMode:null|'home'|'all'` / `slowMs` / `trial`），`GET /__calls`，`POST /__reset`。
+  - `bridge:'error'` → `/status` 报 `bridge:'error'`，数据接口 503 `code:'BRIDGE'`（验证「引擎缺失」不白屏）。
+  - `errorMode:'home'` → 数据接口 500 `code:'NETWORK'`（验证错误态 + 重试原地恢复）。
+
+## 断言覆盖（130 项，v1 + v2）
+
+1. 模块：client.js 加载、`__ModuleLoader__.load`、3 个 slot 注册及 spec（`main.key`、`sidebar.panellist.id/order=30`、`shell.overlay.id`）、`<audio data-nm-audio>` 创建、无曲目时播放条不渲染。
+   侧栏图标：`<img>`、`src` 为 `data:image/png;base64,`（官方红标）、`naturalWidth>0`、渲染尺寸 = 传入 size(20)，深/浅色各一张 4x 放大截图。
+2. 未登录：登录引导可见、不强制遮罩；`.nm-btn.login` / 激活 tab 对比度；打开二维码 Modal；`login-state` `waiting→scanned→ok`；登录后昵称显示；轮询命中 mock 状态机。
+3. 首页：hero、播放全部、推荐歌单卡 ≥6、今日推荐行 ≥10。
+4. 播放：播放全部 → `player` 出现 / `data-playing=true`；`player-toggle` 内有 `svg` 且图标对比度 ≥2.5；`audio.src` 指向 mock `/audio` 且非 paused；3s 内进度前进；下一首切歌（audio src id 变化）；暂停后 false；队列面板展开/Esc 收起；点曲目行播放整列表；3s 试听 ended 后自动下一首。
+5. 歌单详情：封面卡 → `detail` → 100 行 → 加载更多 120 行 → 返回。
+6. 搜索：输入「周杰伦」→ 结果出现且命中；`/search` 请求发生；无结果关键词 → `data-nm="empty"` 空态。
+7. 主题与响应式：深/浅色截图；`[data-nm="play-all"]` 对比度 ≥3、激活 tab ≥2.5；真实 DSH 默认主题（`brand-primary` 注入中性 `#f9fafb`）下「播放全部」仍可读；1440 / 1024 / 600 三档 `scrollWidth <= clientWidth+1`。
+8. 错误模式：`/home` 500 → `data-nm="error"` + 后端中文错误文案（非 `Invalid status code`）；点「重试」原地恢复。
+9. 引擎缺失：`/status bridge=error` → 页面不白屏 + 显示安装提示；恢复后首页重新渲染。
+10. v2（契约 §10.5）：
+    - 停靠：dock 落在 `shell.bottom`（两槽都捕获，优先 bottom）、`data-dock="bottom"`、不遮挡 `#composer`、`#root+#composer ≈ body` 且 `body+bottom = app` 高度。
+    - 播放页：点曲目行 → `nowplaying` 出现、audio 在播 currentTime 前进；左上角 logo 为官方 PNG dataURL `<img>`（naturalWidth>0）。
+    - 黑胶：`np-vinyl` 播放中 `is-spinning`；暂停后无 spinning；恢复播放后恢复；切歌词/切回黑胶后状态正确。
+    - 歌词：`lyric-line` ≥5 且恰好一行 `data-active="true"`；播放推进后 active 行变化；点击某行 → `audio.currentTime` 跳到 `data-time` 附近且该行变 active；`np-mode[data-mode="lyrics"]`。
+    - 音质：`np-quality` → `quality-menu` → `quality-option[data-level="lossless"]` → `audio.src` 含 `level=lossless`、audio `data-level="lossless"`、切换前后 currentTime 差 <2s。
+    - 返回：`np-back`/Esc 回列表（列表仍在）；点 `dock-cover` 重新进播放页；浅色播放页截图；600px 底部停靠无溢出。
+11. 运行期：无 `console.error`、无未捕获页面异常；重新播放后播放条恢复。
+
+## 截图
+
+| 文件 | 内容 |
+| --- | --- |
+| `shots/00-sidebar-icon-dark.png` | 侧栏图标 4x 放大（深色，官方红标 PNG） |
+| `shots/00-sidebar-icon-light.png` | 侧栏图标 4x 放大（浅色） |
+| `shots/01-unlogged-home-dark.png` | 未登录首页（登录引导条、可浏览） |
+| `shots/02-login-qr-waiting.png` | 扫码 Modal（waiting） |
+| `shots/03-login-qr-scanned.png` | 已扫码（scanned） |
+| `shots/04-logged-in-home-dark.png` | 登录成功后的首页（账号/VIP 标） |
+| `shots/05-home-dark.png` | 首页 hero + 推荐歌单 + 今日推荐（深色） |
+| `shots/06-player-playing.png` | 播放全部后的底部播放条（播放中） |
+| `shots/06b-player-queue.png` | 播放队列面板展开 |
+| `shots/07-playlist-detail.png` | 长歌单详情（120 首，已加载更多） |
+| `shots/08-search-results.png` | 搜索结果（7 行） |
+| `shots/09-home-light.png` | 首页浅色主题 |
+| `shots/10a-narrow-1024.png` | 1024px 窄屏（无横向溢出） |
+| `shots/10b-narrow-600.png` | 600px 窄屏（无横向溢出） |
+| `shots/11-error-state.png` | `/home` 失败的错误态 + 重试 |
+| `shots/12-engine-missing.png` | 引擎缺失模式（安装提示，不白屏） |
+| `shots/13-nowplaying-vinyl-dark.png` | v2 全屏播放页·黑胶模式（深色） |
+| `shots/14-nowplaying-lyrics-dark.png` | v2 全屏播放页·歌词模式（深色，高亮+翻译） |
+| `shots/15-nowplaying-light.png` | v2 全屏播放页（浅色） |
+| `shots/16-dock-bottom.png` | v2 播放条停靠 shell.bottom（输入框被顶上去，不遮挡） |
+| `shots/17-narrow-600.png` | v2 600px 窄屏底部停靠 |
+
+## 主题 token 说明（与真实 Harness 的差异）
+
+`harness.html` 里 light/dark 两套 token 是 DSH 主题的离线快照。按 Lead 要求：
+
+- `--dsw-alias-brand-primary` 使用强调蓝 `#4d6bfe`（light/dark 同值），`--dsw-alias-bg-overlay` 深色 `#2c2c2e`、浅色 `#ffffff`。
+- 但**真实 DSH 默认主题**（`app.asar` 里的主题定义）里：
+  `--dsw-alias-brand-primary` = `var(--dsw-static-neutral-bluish-1000)`（浅色 `#0f1115`）/ `var(--dsw-static-neutral-bluish-50)`（深色 `#f9fafb`），
+  `--dsh-boot-brand` 同样是中性色，`--dsw-alias-bg-overlay` 深色是 `#61666b`。真正偏蓝的品牌色在 `--dsw-alias-button-info-fill` / `--dsw-alias-brand-primary-new-colorprimary-new-color`（deepseek-400/450）。
+- 因此 run.mjs 额外做一次「中性 brand 注入」回归：临时把 `--dsw-alias-brand-primary` 设为真实深色值 `#f9fafb`，断言 `[data-nm="play-all"]` 仍 ≥3:1；用于防止 accent 依赖 brand token 导致真机白底白字。若真实主题使用蓝色 accent，这条也会通过。
+- 主题 token 随 DSH 版本变化时需要更新此处快照。
+
+## 已知局限
+
+- headless Chrome 必须 `--no-sandbox --disable-setuid-sandbox --disable-crash-reporter --disable-breakpad`：
+  本机 DSH 沙箱不允许 Chrome 写 `~/Library/Application Support/Google/Chrome/Crashpad`，否则 Chrome 直接 `Trace/BPT trap`；
+  `--user-data-dir` 固定放本目录 `tmp/chrome-profile`（工作区内）。CDP `send` 有 20s 超时、整轮有 8 分钟 watchdog。
+- harness 只模拟 56px 左侧栏 + 全宽 main + 64px 假输入框，没有 DSH 的真实顶栏/标题栏/输入框；`--dsh-frame-top-clearance` 设为 20px。
+- `shell.bottom` 用「root 级底部 flex 行 + 压缩 #body」近似真实占位槽；真实 Harness 的槽位实现/高度策略可能不同，需真机复核。回退路径可用 `?shellBottom=throw` 模拟（dock 应回退 `shell.overlay` + `data-dock="float"`）。
+  真实安装后 `--dsh-frame-top-clearance` 是否存在、页面顶部是否被 Harness 顶栏遮挡，**本 harness 无法验证**（需在真实 Harness 里目视确认）。
+- mock 音频是 3s 正弦波，与真实曲目时长无关；播放/切歌/进度/ended 只验证行为，不验证真实音质。
+- 封面/头像是本地渐变 SVG，不是真实图片，视觉上只检查布局与占位。
+- 登录态是 mock 状态机，不涉及真实扫码/cookie；错误/引擎缺失通过 `/__config` 切换。
+- 对比度断言对 `color-mix()` 等计算色做近似（向上合成半透明背景层），阈值按 Lead 要求：正文 3:1、图标/辅助 2.5:1。

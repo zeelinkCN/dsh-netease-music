@@ -1,0 +1,25 @@
+# 网易云音乐：面板插件（UI + 播放条）与同源 MCP（供 DeepSeek 的 Agent 调用）
+#
+# - netease-music：客户端插件本体；首次激活时会自动安装数据引擎
+#   （clone cloud-music-mcp + 创建 venv + pip install），无需用户在命令行做任何事。
+# - netease-mcp：把 cloud-music-mcp 作为 stdio MCP 服务器接入，Agent 因此获得 cloud_music_* 工具；
+#   它与面板共享同一份登录态。若不需要 Agent 直接操作音乐，删掉这一项即可。
+#
+# 注意：command 是绝对路径；移动工作区后改成新的 engine 位置即可。
+# 命令暂时不存在时 failOnStartupError=false + reconnect 会持续重试，不影响 Harness 启动。
+- insert:
+    - id: netease-music
+      name: '@local/netease-music'
+    - id: netease-mcp
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: netease
+        transport: stdio
+        command: /Users/lz/Documents/deepseek-harness/default-workspace/dsh-netease-music/engine/cloud-music-mcp/.venv/bin/cloud-music-mcp
+        toolCallTimeoutMs: 180000
+        failOnStartupError: false
+        reconnect:
+          enabled: true
+          initialDelayMs: 1000
+          maxDelayMs: 15000
+          maxAttempts: 40
