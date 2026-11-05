@@ -1640,6 +1640,8 @@ window.__ModuleLoader__.load({
     const likeQueue = new Set()
     let likeFlushTimer = null
     let likeGlobalToast = null
+    /* 服务端 /like/status 返回的登录态；false 时红心置灰、点击只提示登录，绝不发 POST */
+    let likeServerAuthed = null
 
     function setLikeToast(fn) {
       likeGlobalToast = fn || null
@@ -1664,6 +1666,7 @@ window.__ModuleLoader__.load({
       likeCheckedAt.clear()
       likePending.clear()
       likeQueue.clear()
+      likeServerAuthed = null
       if (likeFlushTimer) {
         clearTimeout(likeFlushTimer)
         likeFlushTimer = null
@@ -1690,6 +1693,7 @@ window.__ModuleLoader__.load({
       ids.forEach((id) => likeQueue.delete(id))
       if (!ids.length) return
       apiGet('/like/status?ids=' + ids.join(',')).then((data) => {
+        likeServerAuthed = !!(data && data.authed)
         const liked = (data && data.liked) || {}
         ids.forEach((id) => {
           likeCache.set(id, liked[id] === true)
@@ -1705,7 +1709,7 @@ window.__ModuleLoader__.load({
     function toggleLike(trackId, t) {
       const id = String(trackId === undefined || trackId === null ? '' : trackId)
       if (!id) return
-      if (!authInfo.authed) {
+      if (!authInfo.authed || likeServerAuthed === false) {
         pushLikeToast(t('like.needLogin'))
         return
       }
@@ -1744,6 +1748,7 @@ window.__ModuleLoader__.load({
         liked: likeCache.get(id) === true,
         known: likeCheckedAt.has(id),
         pending: likePending.has(id),
+        canLike: auth.authed && likeServerAuthed !== false,
       }
     }
 
@@ -1755,7 +1760,7 @@ window.__ModuleLoader__.load({
       const liked = info.liked
       return h('button', {
         type: 'button',
-        className: cx('nm-like', liked && 'is-liked', info.pending && 'is-pending', props.className),
+        className: cx('nm-like', liked && 'is-liked', info.pending && 'is-pending', !info.canLike && 'is-disabled', props.className),
         'data-nm': props.nm || 'track-like',
         'data-id': String(trackId === undefined || trackId === null ? '' : trackId),
         'data-liked': liked ? 'true' : 'false',
@@ -4865,6 +4870,7 @@ window.__ModuleLoader__.load({
     .nm-like:active{transform:scale(.9)}
     .nm-like.is-liked{color:#ec4141}
     .nm-like.is-pending{opacity:.55;cursor:default}
+    .nm-like.is-disabled{opacity:.45}
     .nm-track-like{width:26px;height:26px;margin-right:2px}
     .nm-np-title-row{display:flex;align-items:center;justify-content:center;gap:10px;flex-wrap:wrap;min-width:0}
     .nm-np-like{width:30px;height:30px;color:var(--nm-t2)}
