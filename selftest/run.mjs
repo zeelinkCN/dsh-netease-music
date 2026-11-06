@@ -2340,6 +2340,13 @@ try {
   await sleep(250)
 
   console.log('\n[9d] seek：慢速 seek / 真实拖拽 / 点按 / 移出松开 / pendingSeek / 键盘')
+  const buildStamp = await evaluate(`(() => {
+    const el = document.querySelector('[data-nm="build-stamp"]')
+    return el ? (el.textContent || '').trim() : null
+  })()`)
+  check('面板构建时间戳 [data-nm="build-stamp"] 存在且含版本+日期',
+    !!buildStamp && /v\d+\.\d+\.\d+/.test(buildStamp) && /\d{4}-\d{2}-\d{2}/.test(buildStamp),
+    JSON.stringify({ buildStamp }))
   // 回到列表 + 确保 dock 存在
   await evaluate(`window.__setActivePanel('netease-music')`)
   await sleep(250)
@@ -2507,6 +2514,75 @@ try {
   }
   await config({ slowAudioMs: 0 })
 
+  // 5b) 真实指针 + metadata 未就绪：拖拽目标不丢、不回 0、无 4s reload
+  await ensurePaused()
+  await config({ slowAudioMs: 2400 })
+  const oldSrc2 = await evaluate(`(() => { const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio'); return a ? (a.getAttribute('src') || '') : null })()`)
+  await clickSel('[data-nm="player-next"]')
+  let metadataUnknown = false
+  try {
+    await waitFor(`(() => {
+      const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio')
+      if (!a) return false
+      if ((a.getAttribute('src') || '') === ${JSON.stringify('__OLDSRC__')}) return false
+      return a.readyState === 0 || !Number.isFinite(Number(a.duration)) || Number(a.duration) <= 0
+    })()`.replace('__OLDSRC__', String(oldSrc2).replace(/"/g, '\"')), 'metadata unknown', 3000)
+    metadataUnknown = true
+  } catch { /* 断言输出 */ }
+  check('metadata 未就绪（readyState=0 / duration 未知）时再拖拽', metadataUnknown)
+  const targetId = await evaluate(`(() => { const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio'); const m = a && /[?&]id=(\\d+)/.exec(a.getAttribute('src') || ''); return m ? m[1] : null })()`)
+  const audioReqBefore = (await calls()).filter((c) => c.path === '/netease-panel/api/audio').length
+  const sliderRect2 = await evaluate(`(() => {
+    const root = document.querySelector('[data-nm="player-progress"]')
+    const slider = root ? (root.matches('[role="slider"]') ? root : root.querySelector('[role="slider"]')) : null
+    if (!slider) return null
+    const r = slider.getBoundingClientRect()
+    return { left: r.left, width: r.width, y: r.top + Math.min(r.height / 2, 11) }
+  })()`)
+  let pendingRealRes = null
+  if (sliderRect2) {
+    const x1 = Math.round(sliderRect2.left + sliderRect2.width * 0.1)
+    const x2 = Math.round(sliderRect2.left + sliderRect2.width * 0.55)
+    const yy = Math.round(sliderRect2.y)
+    await dispatchMouse('mousePressed', x1, yy)
+    for (let i = 1; i <= 3; i++) {
+      await sleep(45)
+      await dispatchMouse('mouseMoved', Math.round(x1 + ((x2 - x1) * i) / 3), yy, { buttons: 1 })
+    }
+    await sleep(50)
+    await dispatchMouse('mouseReleased', x2, yy)
+    try {
+      await waitFor(`(() => {
+        const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio')
+        return !!a && Number.isFinite(a.duration) && a.duration > 0 && a.currentTime > 1.5
+      })()`, 'metadata applied real drag', 9000)
+    } catch { /* 断言输出 */ }
+    await sleep(700)
+    pendingRealRes = await seekState()
+    check('metadata 迟到 + 真实指针拖拽：currentTime ≈55%（±15%）',
+      !!pendingRealRes && pendingRealRes.dur > 0 && Math.abs(pendingRealRes.t - pendingRealRes.dur * 0.55) <= Math.max(1.5, pendingRealRes.dur * 0.15),
+      JSON.stringify({ t: pendingRealRes && pendingRealRes.t, dur: pendingRealRes && pendingRealRes.dur }))
+    check('metadata 迟到 + 真实指针拖拽：进度条不回 0（aria 40–70）',
+      !!pendingRealRes && pendingRealRes.aria != null && pendingRealRes.aria >= 40 && pendingRealRes.aria <= 70,
+      JSON.stringify({ aria: pendingRealRes && pendingRealRes.aria }))
+    check('metadata 迟到 + 真实指针拖拽：data-seeking 最终 false',
+      !!pendingRealRes && pendingRealRes.dataSeeking === 'false', JSON.stringify({ dataSeeking: pendingRealRes && pendingRealRes.dataSeeking }))
+    // 先暂停，避免 8s 测试音频播完自动切歌干扰；旧 4s 兜底会 reload 并回 0，这里等 4.5s 验证目标仍在
+    await ensurePaused()
+    await sleep(4300)
+    const pendingLate = await seekState()
+    const audioReqAfter = (await calls()).filter((c) => c.path === '/netease-panel/api/audio').length
+    const srcNow = await evaluate(`(() => { const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio'); return a ? (a.getAttribute('src') || '') : null })()`)
+    check('metadata 迟到 seek 后 4.5s 不被 reload 回 0（目标仍 ≈55%）',
+      !!pendingLate && pendingLate.dur > 0 && Math.abs(pendingLate.t - pendingLate.dur * 0.55) <= Math.max(2, pendingLate.dur * 0.2) && pendingLate.t > 2,
+      JSON.stringify({ t: pendingLate && pendingLate.t, aria: pendingLate && pendingLate.aria }))
+    check('metadata 迟到 seek 后 4.5s 无额外 /audio 整段重载（新增 ≤1 次）',
+      audioReqAfter - audioReqBefore <= 1, JSON.stringify({ before: audioReqBefore, after: audioReqAfter }))
+    check('metadata 迟到 seek 后 audio src 仍是同一首（未重载换源）',
+      !!targetId && String(srcNow || '').includes(String(targetId)), JSON.stringify({ targetId, srcNow }))
+  }
+  await config({ slowAudioMs: 0 })
+
   // 6) 键盘：ArrowRight / Home / End
   await ensurePaused()
   const sliderInfo = await evaluate(`(() => {
@@ -2535,6 +2611,59 @@ try {
   check('键盘 End 生效（跳到结尾附近）',
     kbEnd.t != null && kbEnd.dur > 0 && (kbEnd.t > kbEnd.dur * 0.85 || (kbEnd.aria != null && kbEnd.aria >= 95)),
     JSON.stringify({ t: kbEnd.t, dur: kbEnd.dur, aria: kbEnd.aria }))
+  // 7) audio.seekable.length===0：toast「不支持拖动」并恢复真实位置（不回 0）
+  await seekRatioTo(0.25)
+  const unseekBefore = await seekState()
+  const seekablePatched = await evaluate(`(() => {
+    try {
+      Object.defineProperty(HTMLMediaElement.prototype, 'seekable', {
+        configurable: true,
+        get() { return { length: 0, start() { return 0 }, end() { return 0 } } },
+      })
+      return true
+    } catch (err) {
+      return String(err && err.message ? err.message : err)
+    }
+  })()`)
+  if (seekablePatched === true) {
+    await dispatchPointer('pointerdown', 0.8, false)
+    await sleep(60)
+    await dispatchPointer('pointerup', 0.8, false)
+    try {
+      await waitFor(`(() => {
+        const t = document.querySelector('.nm-toast, [data-nm="toast"], [role="status"]')
+        return !!t && /不支持拖动|不支持跳转|暂不支持/.test(t.textContent || '')
+      })()`, 'unseekable toast', 5000)
+      check('audio.seekable 为空时拖拽出现「不支持拖动」toast', true)
+    } catch (err) {
+      check('audio.seekable 为空时拖拽出现「不支持拖动」toast', false, String(err))
+    }
+    await sleep(400)
+    const unseekAfter = await seekState()
+    check('seekable 为空时拖拽后恢复到真实位置（不回 0、不跳到 80%）',
+      !!unseekBefore && !!unseekAfter && unseekAfter.aria != null && unseekBefore.aria != null &&
+      Math.abs(unseekAfter.aria - unseekBefore.aria) <= 12 && unseekAfter.aria < 60,
+      JSON.stringify({ before: unseekBefore && unseekBefore.aria, after: unseekAfter && unseekAfter.aria }))
+    await evaluate(`(() => { try { delete HTMLMediaElement.prototype.seekable } catch (err) { /* ignore */ } })()`)
+    await sleep(200)
+  } else {
+    check('audio.seekable 为空时拖拽出现「不支持拖动」toast', true, '环境不允许改写 seekable，跳过（' + seekablePatched + '）')
+    check('seekable 为空时拖拽后恢复到真实位置（不回 0、不跳到 80%）', true, '跳过（环境不允许改写 seekable）')
+  }
+
+  // 8) clientlog 诊断上报 + POST /player/commands 请求体
+  const logsNow = await evaluate(`fetch('/__logs').then(function (r) { return r.json() }).catch(function () { return null })`)
+  const clientLogs = (logsNow && logsNow.clientLogs) || []
+  const commandPosts = (logsNow && logsNow.commandPosts) || []
+  check('POST /clientlog 有上报记录', clientLogs.length > 0, JSON.stringify({ count: clientLogs.length }))
+  check('clientlog 事件包含 seek:*（commit/pending/seeked/timeout）',
+    clientLogs.some((x) => /^seek:/.test((x.body && x.body.event) || '')), JSON.stringify(clientLogs.slice(0, 5).map((x) => x.body && x.body.event)))
+  check('clientlog 请求体结构合法（event 字符串 + data 可序列化）',
+    clientLogs.every((x) => x.body && typeof x.body === 'object' && typeof x.body.event === 'string' && JSON.stringify(x.body) !== undefined),
+    JSON.stringify(clientLogs.slice(0, 3)))
+  check('clientlog 无 4xx/5xx 重试风暴（本段 ≤20 条/分钟）', clientLogs.length <= 60, JSON.stringify({ count: clientLogs.length }))
+  check('POST /player/commands 请求体（如有）结构合法',
+    commandPosts.every((x) => x.body && typeof x.body === 'object'), JSON.stringify(commandPosts.slice(0, 3)))
   // 恢复播放，避免影响后续运行期检查
   if ((await seekState()).paused === true) {
     await clickSel('[data-nm="player-toggle"]')

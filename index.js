@@ -494,6 +494,9 @@ export function apply(ctx) {
       if (res.writableEnded) return
       return fail(res, `音源连接失败：${err?.message ?? err}`, 'NETWORK')
     }
+    if (req.headers.range && !/^bytes=0-/.test(String(req.headers.range))) {
+      log('[audio-range]', 'id=' + id, 'level=' + level, String(req.headers.range).slice(0, 40))
+    }
     if (!upstream.ok && upstream.status !== 206) {
       if (res.writableEnded) return
       return fail(res, `音源返回 HTTP ${upstream.status}`, 'NETWORK')
@@ -809,6 +812,29 @@ export function apply(ctx) {
     }
 
     const routes = [
+      /* 客户端诊断日志（临时/低频）：客户端把关键事件 POST 到这里，落到 bridge.log 便于真机排查 */
+      route(
+        'clientlog',
+        handle(async (url, req) => {
+          if (req.method && req.method !== 'POST') throw new PluginError('请用 POST 上报日志', 'INTERNAL')
+          let body = {}
+          try {
+            body = await readJson(req)
+          } catch (err) {
+            throw err
+          }
+          const event = typeof body.event === 'string' ? body.event.slice(0, 80) : 'event'
+          let data = ''
+          try {
+            data = JSON.stringify(body.data === undefined ? null : body.data).slice(0, 800)
+          } catch (err) {
+            data = '"<unserializable>"'
+          }
+          log('[client]', event, data)
+          return { ok: true }
+        }),
+      ),
+
       /* 插件内播放器：客户端轮询命令 + 上报播放状态（Agent 工具通过它驱动 UI） */
       route(
         'player/commands',

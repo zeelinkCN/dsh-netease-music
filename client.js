@@ -196,6 +196,9 @@ window.__ModuleLoader__.load({
       'toast.modeError': '暂时无法生成这个歌单，请稍后再试',
       'toast.modeTimeout': '请求超时，请重试',
       'toast.agentPlay': '开始播放：{title}',
+      'toast.seekUnsupported': '当前音源不支持拖动进度',
+      'toast.seekSlow': '跳转较慢，当前音源可能暂不支持跳转',
+      'footer.updated': '更新于',
     }
     const EN = {
       'app.title': 'Netease Music',
@@ -383,6 +386,9 @@ window.__ModuleLoader__.load({
       'toast.modeError': 'Could not build this mix, please try again',
       'toast.modeTimeout': 'Request timed out, please retry',
       'toast.agentPlay': 'Now playing: {title}',
+      'toast.seekUnsupported': 'This audio source does not support seeking',
+      'toast.seekSlow': 'Seeking is slow; this source may not support it',
+      'footer.updated': 'Updated',
     }
 
     /* ------------------------------------------------------------------ *
@@ -555,6 +561,23 @@ window.__ModuleLoader__.load({
         throw makeApiError('网络连接失败，请稍后重试', 'NETWORK', 0)
       }
       return readEnvelope(res)
+    }
+
+    const CLIENT_BUILD = 'v1.0.0 · 2026-11-06 10:24'
+    const clientLogTimes = []
+
+    function clientLog(event, data) {
+      try {
+        const now = Date.now()
+        while (clientLogTimes.length && now - clientLogTimes[0] > 60000) clientLogTimes.shift()
+        if (clientLogTimes.length >= 20) return
+        clientLogTimes.push(now)
+        apiPost('/clientlog', { event: String(event || ''), data: data && typeof data === 'object' ? data : {} }).catch(() => {
+          /* 诊断上报失败静默 */
+        })
+      } catch (err) {
+        /* ignore */
+      }
     }
 
     async function loadDetail(kind, id, signal) {
@@ -858,7 +881,15 @@ window.__ModuleLoader__.load({
               /* ignore */
             }
             lastTimeEmit = Date.now()
-            patch({ position: Math.round(target * 1000), seeking: seekHoldCount > 0, seekTarget: target })
+            clientLog('seek:commit', {
+              target,
+              duration: Number(audio.duration) || 0,
+              readyState: audio.readyState,
+              seekable: seekableCount(),
+              currentTime: Number(audio.currentTime) || 0,
+            })
+            patch({ position: Math.round(target * 1000), seeking: true, seekTarget: target })
+            armSeekWatch(target)
           }
           if (pendingSeek != null) {
             const limit = isFinite(audio.duration) && audio.duration > 0 ? Math.max(0, audio.duration - 0.2) : pendingSeek
@@ -871,7 +902,15 @@ window.__ModuleLoader__.load({
               /* ignore */
             }
             lastTimeEmit = Date.now()
-            patch({ position: Math.round(target * 1000), seeking: seekHoldCount > 0, seekTarget: null })
+            clientLog('seek:commit', {
+              target,
+              duration: Number(audio.duration) || 0,
+              readyState: audio.readyState,
+              seekable: seekableCount(),
+              currentTime: Number(audio.currentTime) || 0,
+            })
+            patch({ position: Math.round(target * 1000), seeking: true, seekTarget: target })
+            armSeekWatch(target)
           }
           if (!pendingResume) return
           const resume = pendingResume
@@ -905,8 +944,15 @@ window.__ModuleLoader__.load({
         })
         on('seeked', () => {
           if (!audio) return
+          const landedTarget = state.seekTarget
           clearSeekTimers()
+          pendingSeek = null
+          pendingSeekRatio = null
           lastTimeEmit = Date.now()
+          clientLog('seek:seeked', {
+            currentTime: Number(audio.currentTime) || 0,
+            target: Number.isFinite(Number(landedTarget)) ? Number(landedTarget) : null,
+          })
           patch({
             seeking: seekHoldCount > 0,
             seekTarget: null,
@@ -930,6 +976,11 @@ window.__ModuleLoader__.load({
         })
         on('error', () => {
           const code = audio && audio.error ? audio.error.code : 'x'
+          clientLog('audio:error', {
+            code,
+            message: audio && audio.error ? String(audio.error.message || '').slice(0, 200) : '',
+            src: { id: state.current ? state.current.id : null, level: state.quality },
+          })
           if (!audio || !state.current) return
           patch({ error: 'playback', playing: false, loading: false })
         })
@@ -976,6 +1027,10 @@ window.__ModuleLoader__.load({
         }
         if (promise && typeof promise.catch === 'function') {
           promise.catch((err) => {
+            clientLog('play:reject', {
+              name: (err && err.name) || '',
+              message: (err && err.message) ? String(err.message).slice(0, 200) : '',
+            })
             if (isAbort(err)) return
             if (err && err.name === 'NotAllowedError') {
               patch({ playing: false, loading: false })
@@ -1183,50 +1238,91 @@ window.__ModuleLoader__.load({
         loadCurrent(true)
       }
 
+      function seekableCount() {
+        return audio && audio.seekable ? audio.seekable.length : 0
+      }
+
+      /* 统一的 seek 监控：6s 未落地重试一次；12s 仍无 seeked 则 toast 并恢复真实位置。
+         绝不 reload audio，避免进度被重置到 0。 */
+      function armSeekWatch(target) {
+        clearSeekTimers()
+        if (!audio) return
+        const targetSec = Number.isFinite(Number(target)) ? Math.max(0, Number(target)) : null
+        if (targetSec !== null) {
+          seekFallbackTimer = setTimeout(() => {
+            seekFallbackTimer = null
+            if (!audio || !state.seeking) return
+            try {
+              if (seekableCount() > 0) audio.currentTime = targetSec
+            } catch (err) {
+              /* ignore */
+            }
+          }, 6000)
+        }
+        seekRecoverTimer = setTimeout(() => {
+          seekRecoverTimer = null
+          if (!audio || !state.seeking) return
+          clientLog('seek:timeout', {
+            target: targetSec,
+            currentTime: Number(audio.currentTime) || 0,
+            seekable: seekableCount(),
+          })
+          pendingSeek = null
+          pendingSeekRatio = null
+          notifyToast('seekSlow')
+          patch({
+            seeking: false,
+            seekTarget: null,
+            position: Math.round((audio.currentTime || 0) * 1000),
+          })
+        }, 12000)
+      }
+
       function seekSeconds(seconds) {
         if (!audio) return
         const wanted = Math.max(0, Number(seconds) || 0)
         const duration = audioDurationSeconds()
         const metadataReady = audio.readyState >= 1 && isFinite(Number(audio.duration)) && Number(audio.duration) > 0
         if (!duration || !metadataReady) {
-          /* 元数据未到：存 pendingSeek，loadedmetadata 时应用（不要在 readyState 0 上硬设） */
+          /* 元数据未到：记 pending，并挂统一的 6s/12s 监控，避免永远卡在 seeking */
           pendingSeekRatio = null
           pendingSeek = wanted / 1000
-          patch({ seeking: true, seekTarget: pendingSeek })
+          lastTimeEmit = Date.now()
+          clientLog('seek:pending', {
+            target: pendingSeek,
+            readyState: audio.readyState,
+            duration: Number(audio.duration) || 0,
+            seekable: seekableCount(),
+          })
+          patch({ seeking: true, seekTarget: pendingSeek, position: Math.round(pendingSeek * 1000) })
+          armSeekWatch(pendingSeek)
           return
         }
         const target = clamp(wanted, 0, duration * 1000) / 1000
         clearSeekTimers()
         lastTimeEmit = Date.now()
+        clientLog('seek:commit', {
+          target,
+          duration: Number(audio.duration) || 0,
+          readyState: audio.readyState,
+          seekable: seekableCount(),
+          currentTime: Number(audio.currentTime) || 0,
+        })
+        if (seekableCount() === 0) {
+          /* 音源不可 seek：直接提示并回到实际位置 */
+          pendingSeek = null
+          pendingSeekRatio = null
+          notifyToast('seekUnsupported')
+          patch({ seeking: false, seekTarget: null, position: Math.round((audio.currentTime || 0) * 1000) })
+          return
+        }
         patch({ seeking: true, seekTarget: target, position: Math.round(target * 1000) })
         try {
           audio.currentTime = target
         } catch (err) {
-          /* 交给 seek 超时兜底 */
+          /* armSeekWatch 会兜底重试 */
         }
-        seekFallbackTimer = setTimeout(() => {
-          seekFallbackTimer = null
-          if (!audio || (!state.seeking && seekHoldCount === 0)) return
-          patch({
-            seeking: seekHoldCount > 0,
-            seekTarget: null,
-            position: Math.round((audio.currentTime || 0) * 1000),
-          })
-        }, 2500)
-        seekRecoverTimer = setTimeout(() => {
-          seekRecoverTimer = null
-          if (!audio || !state.seeking) return
-          const track = state.current
-          if (!track) return
-          pendingResume = { seconds: target, playing: state.playing }
-          try {
-            audio.src = buildAudioUrl(track.id, state.quality)
-            audio.load()
-            patch({ loading: true })
-          } catch (err) {
-            patch({ seeking: false, seekTarget: null })
-          }
-        }, 4000)
+        armSeekWatch(target)
       }
 
       function beginSeekHold() {
@@ -1237,6 +1333,8 @@ window.__ModuleLoader__.load({
       function endSeekHold() {
         seekHoldCount = Math.max(0, seekHoldCount - 1)
         if (seekHoldCount > 0) return
+        /* seek 还没落地（等元数据 / 音源确认中）：保持目标位置，绝不用旧 currentTime 回写 */
+        if (pendingSeek != null || pendingSeekRatio != null || state.seeking) return
         clearSeekTimers()
         lastTimeEmit = Date.now()
         patch({
@@ -1253,35 +1351,17 @@ window.__ModuleLoader__.load({
           seekSeconds(value * Number(audio.duration) * 1000)
           return
         }
-        /* 元数据还没到：按比例记录，metadata 到达后用真实时长换算，避免用旧 track.duration 造成偏差 */
+        /* 元数据还没到：按比例记录，metadata 到达后换算真实时长；同样挂 12s 监控 */
         pendingSeek = null
         pendingSeekRatio = value
+        clientLog('seek:pending', {
+          target: null,
+          ratio: value,
+          readyState: audio.readyState,
+          seekable: seekableCount(),
+        })
         patch({ seeking: true, seekTarget: null })
-        if (seekHoldCount === 0) {
-          clearSeekTimers()
-          seekFallbackTimer = setTimeout(() => {
-            seekFallbackTimer = null
-            if (!audio || (!state.seeking && seekHoldCount === 0)) return
-            patch({ seeking: seekHoldCount > 0, seekTarget: null, position: Math.round((audio.currentTime || 0) * 1000) })
-          }, 2500)
-          seekRecoverTimer = setTimeout(() => {
-            seekRecoverTimer = null
-            if (!audio || seekHoldCount > 0) return
-            const track = state.current
-            if (!track) return
-            pendingResume = {
-              seconds: (pendingSeekRatio != null ? pendingSeekRatio : 0) * (Number(audio.duration) || state.duration / 1000 || 0),
-              playing: state.playing,
-            }
-            try {
-              audio.src = buildAudioUrl(track.id, state.quality)
-              audio.load()
-              patch({ loading: true })
-            } catch (err) {
-              patch({ seeking: false, seekTarget: null })
-            }
-          }, 4000)
-        }
+        armSeekWatch(null)
       }
 
       function setVolume(value) {
@@ -4451,7 +4531,8 @@ window.__ModuleLoader__.load({
                 onInstall: startInstall,
               }) : null,
               showLoginBanner && !engineBroken ? h(LoginBanner, { t, onLogin: openLogin }) : null,
-              showBody || detail ? body : null))),
+              showBody || detail ? body : null),
+            h('div', { className: 'nm-build-stamp', 'data-nm': 'build-stamp' }, t('footer.updated') + ' ' + CLIENT_BUILD))),
         h(PlayerDock),
         loginOpen
           ? h(LoginModal, {
@@ -4927,6 +5008,7 @@ window.__ModuleLoader__.load({
     .nm-track-actions{display:flex;align-items:center;justify-content:flex-end;gap:0;opacity:0;transition:opacity 140ms ease}
     .nm-track:hover .nm-track-actions,.nm-track:focus-within .nm-track-actions,.nm-track.is-active .nm-track-actions{opacity:1}
     .nm-track-actions .nm-icon-btn{width:28px;height:28px}
+    .nm-build-stamp{padding:18px 0 10px;text-align:center;font-size:10.5px;letter-spacing:.02em;color:var(--nm-t3);opacity:.75;user-select:none}
     .nm-load-more{display:flex;justify-content:center;padding:16px 0 4px}
     .nm-wave{display:inline-flex;align-items:flex-end;justify-content:center;gap:2px;height:15px;width:16px}
     .nm-wave i{display:block;width:2.5px;height:4px;border-radius:2px;background:var(--nm-accent);opacity:.75}

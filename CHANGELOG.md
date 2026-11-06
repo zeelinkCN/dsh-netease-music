@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.0.1 — 2026-11-06
+
+进度条拖动兜底与真机诊断加固。
+
+- **去掉会跳到 0:00 的兜底**：seek 超时不再重载 `audio.src`；6s 无 `seeked` 只重试一次 `currentTime`，12s 仍无则 toast 并恢复真实位置，绝不把进度重置到 0。
+- **修掉 metadata 未就绪分支卡死**：`pendingSeek` 分支补齐 seek 监控，`seeking` 不会永远停在 true（避免「进度条停在目标位置、声音还在旧位置」）；`endSeekHold` 在 seek 在飞时不再用旧 `currentTime` 回写。
+- **不可 seek 音源的友好提示**：`audio.seekable` 为空时提示「当前音源不支持拖动进度」并恢复位置。
+- 新增客户端诊断日志（`POST /netease-panel/api/clientlog` → `~/.dsh/netease-panel/bridge.log`），上报 `seek:commit / seek:pending / seek:seeked / seek:timeout / audio:error / play:reject`；音频代理增加 Range 请求日志。
+- 面板底部显示构建时间戳（`data-nm="build-stamp"`），便于确认页面是否为最新版。
+- 验收：357/357 断言通过（新增 clientlog mock、无 reload 兜底、build-stamp、seekable=0 等场景）。
+
 ## v1.0.0 — 2026-11-06
 
 首个正式版本：在 DeepSeek Harness 里边工作边听网易云音乐。

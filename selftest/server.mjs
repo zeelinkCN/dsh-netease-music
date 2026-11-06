@@ -340,6 +340,12 @@ function songUrl(id, requested) {
 }
 
 /* ------------------------------------------------------------------ *
+ * v5.1 客户端诊断日志（POST /clientlog 的请求体存档）
+ * ------------------------------------------------------------------ */
+let clientLogs = []
+let commandPosts = []
+
+/* ------------------------------------------------------------------ *
  * v5 插件内播放器：Agent 命令队列 + 客户端状态上报
  * ------------------------------------------------------------------ */
 let playerSeq = 0
@@ -669,7 +675,19 @@ async function handleApi(req, res, path, searchParams) {
       return ok(res, installSummary())
     }
 
+    case '/clientlog': {
+      if (req.method !== 'POST') return fail(res, 'INTERNAL', '请用 POST 上报日志', 405)
+      const body = await readBody(req)
+      clientLogs.push({ at: Date.now(), body })
+      return ok(res, { ok: true })
+    }
+
     case '/player/commands': {
+      if (req.method === 'POST') {
+        const body = await readBody(req)
+        commandPosts.push({ at: Date.now(), body })
+        return ok(res, { ok: true })
+      }
       const raw = searchParams.get('cursor')
       if (raw === null || raw === '') return ok(res, { cursor: playerSeq, commands: [] })
       const cursor = Number(raw) || 0
@@ -786,6 +804,7 @@ const server = createServer(async (req, res) => {
     return json(res, 200, { ...cfg, client: CLIENT, clientExists: existsSync(CLIENT) })
   }
   if (pathname === '/__calls') return json(res, 200, calls)
+  if (pathname === '/__logs') return json(res, 200, { clientLogs, commandPosts })
   if (pathname === '/__reset') {
     calls = []
     loginCheckCount = 0
@@ -802,6 +821,8 @@ const server = createServer(async (req, res) => {
     playerSeq = 0
     playerCommands = []
     playerState = null
+    clientLogs = []
+    commandPosts = []
     cfg.engine = 'installed'
     cfg.installError = false
     cfg.install = { state: 'idle', phase: 'idle', lines: [], error: null, installed: true, startedAt: 0 }
