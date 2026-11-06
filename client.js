@@ -37,6 +37,18 @@ window.__ModuleLoader__.load({
       'action.logout': '退出登录',
       'action.back': '返回',
       'action.close': '关闭',
+      'action.search': '搜索',
+      'action.fullscreen': '全屏播放',
+      'playMode.list': '列表循环',
+      'playMode.order': '顺序播放',
+      'playMode.single': '单曲循环',
+      'playMode.shuffle': '随机播放',
+      'np.fullscreen': '全屏',
+      'np.exitFullscreen': '退出全屏',
+      'toast.playModeList': '播放模式：列表循环',
+      'toast.playModeOrder': '播放模式：顺序播放',
+      'toast.playModeSingle': '播放模式：单曲循环',
+      'toast.playModeShuffle': '播放模式：随机播放',
       'action.queue': '播放队列',
       'action.volume': '音量',
       'action.mute': '静音',
@@ -168,7 +180,7 @@ window.__ModuleLoader__.load({
       'np.open': '打开播放页',
       'np.back': '返回列表',
       'np.volume': '音量',
-      'player.openNowPlaying': '展开播放页',
+      'player.openNowPlaying': '打开播放页',
       'dock.quality': '音质',
       'action.like': '收藏到我喜欢',
       'action.unlike': '取消收藏',
@@ -228,6 +240,18 @@ window.__ModuleLoader__.load({
       'action.logout': 'Sign out',
       'action.back': 'Back',
       'action.close': 'Close',
+      'action.search': 'Search',
+      'action.fullscreen': 'Fullscreen',
+      'playMode.list': 'List loop',
+      'playMode.order': 'Play in order',
+      'playMode.single': 'Repeat one',
+      'playMode.shuffle': 'Shuffle',
+      'np.fullscreen': 'Fullscreen',
+      'np.exitFullscreen': 'Exit fullscreen',
+      'toast.playModeList': 'Play mode: list loop',
+      'toast.playModeOrder': 'Play mode: in order',
+      'toast.playModeSingle': 'Play mode: repeat one',
+      'toast.playModeShuffle': 'Play mode: shuffle',
       'action.queue': 'Play queue',
       'action.volume': 'Volume',
       'action.mute': 'Mute',
@@ -581,7 +605,7 @@ window.__ModuleLoader__.load({
       return readEnvelope(res)
     }
 
-    const CLIENT_BUILD = 'v1.3.2 · auth-fixed 2026-11-06 13:47'
+    const CLIENT_BUILD = 'v1.1.0 · 2026-11-06 14:15'
     const CLIENT_LOG_STORE_KEY = 'netease-music:clientlog-times'
     const clientLogTimes = []
     const clientLogPriorityTimes = []
@@ -605,7 +629,7 @@ window.__ModuleLoader__.load({
     function clientLog(event, data) {
       try {
         const name = String(event || '')
-        const priority = /^seek:recover/.test(name) || name === 'media:loadedmetadata'
+        const priority = /^seek:recover/.test(name)
         const now = Date.now()
         const bucket = priority ? clientLogPriorityTimes : clientLogTimes
         while (bucket.length && now - bucket[0].at > 60000) bucket.shift()
@@ -666,6 +690,23 @@ window.__ModuleLoader__.load({
         if (QUALITY_LEVELS[i].key === value) return value
       }
       return 'auto'
+    }
+
+    function playModeIcon(mode) {
+      if (mode === 'order') return 'order'
+      if (mode === 'single') return 'repeatOne'
+      if (mode === 'shuffle') return 'shuffle'
+      return 'repeat'
+    }
+
+    const PLAY_MODES = ['list', 'order', 'single', 'shuffle']
+    const PLAY_MODE_TOAST = { list: 'playModeList', order: 'playModeOrder', single: 'playModeSingle', shuffle: 'playModeShuffle' }
+
+    function normalizePlayMode(value) {
+      for (let i = 0; i < PLAY_MODES.length; i += 1) {
+        if (PLAY_MODES[i] === value) return value
+      }
+      return 'list'
     }
 
     function qualityLabel(level, t) {
@@ -751,6 +792,7 @@ window.__ModuleLoader__.load({
       let lastTimeEmit = 0
       let lastVolume = 0.8
       let toastTimer = null
+      const shuffleHistory = []
       let pendingResume = null
       let pendingSeek = null
       let pendingSeekRatio = null
@@ -780,6 +822,7 @@ window.__ModuleLoader__.load({
         seeking: false,
         seekTarget: null,
         quality: normalizeQuality(safeRead('netease-music:quality')),
+        playMode: normalizePlayMode(safeRead('netease-music:play-mode')),
         actualLevel: null,
         actualBr: 0,
         trial: false,
@@ -849,39 +892,6 @@ window.__ModuleLoader__.load({
            App 页面在 dsh-app:// 协议下，媒体必须用真实 http 绝对地址（否则丢 Content-Length，不可 seek）。 */
         const base = audioHttpBase ? audioHttpBase + '/netease-panel/api' : API
         return base + '/audio?' + qs({ id, level: level || state.quality || 'auto', _: Date.now() })
-      }
-
-      let probedAudioStream = false
-      async function probeAudioStream(url) {
-        if (probedAudioStream) return
-        probedAudioStream = true
-        try {
-          const res = await fetch(url, { method: 'GET', headers: { Range: 'bytes=0-1023' }, cache: 'no-store' })
-          const headers = {}
-          ;['content-type', 'content-length', 'content-range', 'accept-ranges', 'transfer-encoding', 'cache-control', 'etag'].forEach((key) => {
-            headers[key] = res.headers.get(key)
-          })
-          try { await res.body.cancel() } catch (err) { /* ignore */ }
-          const snap = () => ({
-            seekable: audio && audio.seekable && audio.seekable.length ? [audio.seekable.start(0), audio.seekable.end(0)] : [],
-            readyState: audio ? audio.readyState : -1,
-            networkState: audio ? audio.networkState : -1,
-            duration: audio ? Number(audio.duration) || 0 : 0,
-          })
-          clientLog('probe:audio', {
-            status: res.status,
-            headers,
-            origin: typeof location !== 'undefined' ? location.origin : '',
-            baseURI: typeof document !== 'undefined' ? document.baseURI : '',
-            srcAbs: audio ? String(audio.currentSrc || '').replace(/[?&]_=\d+/, '').slice(0, 140) : '',
-            ...snap(),
-          })
-          setTimeout(() => {
-            try { clientLog('probe:audio-later', snap()) } catch (err) { /* ignore */ }
-          }, 1500)
-        } catch (err) {
-          clientLog('probe:audio-error', { message: String((err && err.message) || err) })
-        }
       }
 
       function syncAudioLevel() {
@@ -967,7 +977,6 @@ window.__ModuleLoader__.load({
         if (!el) return
         unbindAudio()
         audio = el
-        clientLog('audio:bind', { audioId: el.dataset ? el.dataset.nmAudioId : null })
         el.preload = 'metadata'
         el.volume = state.volume
         syncAudioLevel()
@@ -1060,23 +1069,6 @@ window.__ModuleLoader__.load({
           applyResume(0)
         })
         on('durationchange', syncDuration)
-        ;['loadstart', 'emptied', 'loadedmetadata', 'abort', 'error', 'stalled', 'suspend', 'waiting', 'canplay'].forEach((eventName) => {
-          on(eventName, () => {
-            if (eventName === 'error') return
-            /* 只在 seek 活跃期记录 media 事件，避免正常播放时刷爆诊断预算 */
-            if (!state.seeking && Date.now() - lastSeekLogAt > 2500) return
-            try {
-              clientLog('media:' + eventName, {
-                audioId: audio && audio.dataset ? audio.dataset.nmAudioId : null,
-                currentTime: audio ? Number(audio.currentTime) || 0 : 0,
-                readyState: audio ? audio.readyState : -1,
-                networkState: audio ? audio.networkState : -1,
-                paused: audio ? !!audio.paused : null,
-                seekable: eventName === 'loadedmetadata' ? rangeSnapshot('seekable') : undefined,
-              })
-            } catch (err) { /* ignore */ }
-          })
-        })
         on('timeupdate', () => {
           if (!audio) return
           const now = Date.now()
@@ -1232,7 +1224,6 @@ window.__ModuleLoader__.load({
         try {
           const nextAudioUrl = buildAudioUrl(track.id, state.quality)
         audio.src = nextAudioUrl
-        probeAudioStream(nextAudioUrl)
           audio.load()
         } catch (err) {
           patch({ error: 'playback', loading: false })
@@ -1276,6 +1267,7 @@ window.__ModuleLoader__.load({
       function playQueue(tracks, startIndex, contextTitle) {
         const list = uniqById(toArray(tracks).filter(Boolean))
         if (!list.length) return
+        shuffleHistory.length = 0
         const index = Math.floor(clamp(startIndex || 0, 0, list.length - 1))
         patch({
           queue: list,
@@ -1374,14 +1366,36 @@ window.__ModuleLoader__.load({
       function next(auto) {
         const queue = state.queue
         if (!queue.length) return
-        let index = state.index + 1
-        if (index >= queue.length) {
-          if (auto) {
-            patch({ playing: false, position: state.duration })
-            return
+        if (state.playMode === 'shuffle') {
+          shuffleHistory.push(state.index)
+          let index = state.index
+          if (queue.length > 1) {
+            for (let guard = 0; guard < 8 && index === state.index; guard += 1) {
+              index = Math.floor(Math.random() * queue.length)
+            }
+          } else {
+            index = 0
           }
-          index = 0
+          patch({ index })
+          loadCurrent(true)
+          return
         }
+        if (state.playMode === 'single' && auto) {
+          seekSeconds(0)
+          requestPlay()
+          return
+        }
+        if (state.playMode === 'order' && state.index >= queue.length - 1) {
+          try {
+            if (audio) audio.pause()
+          } catch (err) {
+            /* ignore */
+          }
+          patch({ playing: false, position: state.duration })
+          return
+        }
+        let index = state.index + 1
+        if (index >= queue.length) index = 0
         patch({ index })
         loadCurrent(true)
       }
@@ -1389,6 +1403,14 @@ window.__ModuleLoader__.load({
       function prev() {
         const queue = state.queue
         if (!queue.length) return
+        if (state.playMode === 'shuffle' && shuffleHistory.length) {
+          const historyIndex = shuffleHistory.pop()
+          if (historyIndex >= 0 && historyIndex < queue.length) {
+            patch({ index: historyIndex })
+            loadCurrent(true)
+            return
+          }
+        }
         if (audio && audio.currentTime > 3) {
           seekSeconds(0)
           return
@@ -1397,6 +1419,20 @@ window.__ModuleLoader__.load({
         if (index < 0) index = queue.length - 1
         patch({ index })
         loadCurrent(true)
+      }
+
+      function setPlayMode(mode) {
+        const nextMode = normalizePlayMode(mode)
+        if (nextMode === state.playMode) return
+        shuffleHistory.length = 0
+        safeWrite('netease-music:play-mode', nextMode)
+        patch({ playMode: nextMode })
+        notifyToast(PLAY_MODE_TOAST[nextMode] || 'playModeList')
+      }
+
+      function cyclePlayMode() {
+        const current = PLAY_MODES.indexOf(state.playMode)
+        setPlayMode(PLAY_MODES[(current + 1) % PLAY_MODES.length])
       }
 
       function seekableCount() {
@@ -1722,6 +1758,8 @@ window.__ModuleLoader__.load({
         prev,
         jump,
         seekSeconds,
+        setPlayMode,
+        cyclePlayMode,
         seekRatio,
         beginSeekHold,
         endSeekHold,
@@ -1887,25 +1925,8 @@ window.__ModuleLoader__.load({
             } catch (err) { /* ignore */ }
           }
           if (data && data.httpBase) player.adoptHttpBase(data.httpBase)
-          try {
-            clientLog('status:auth', {
-              authed: !!(data && data.authed),
-              nickname: (data && data.nickname) || null,
-              anonymous: !!(data && data.anonymous),
-              bridge: (data && data.bridge) || null,
-              httpBase: (data && data.httpBase) || null,
-            })
-          } catch (err) { /* ignore */ }
           if (alive.current) setState({ loading: false, data, error: null })
         } catch (err) {
-          try {
-            clientLog('status:error', {
-              message: String((err && err.message) || err),
-              code: (err && err.code) || null,
-              status: (err && err.status) || null,
-              viaHttp: !!audioHttpBase,
-            })
-          } catch (logErr) { /* ignore */ }
           if (alive.current) setState((prev) => ({ loading: false, data: prev.data, error: (err && err.message) || '连接失败' }))
         }
       }, [])
@@ -1991,8 +2012,22 @@ window.__ModuleLoader__.load({
       emitNpOpen()
     }
 
+    function exitNativeFullscreen(reason) {
+      try {
+        if (typeof document === 'undefined' || !document.fullscreenElement) return false
+        const promise = document.exitFullscreen()
+        if (promise && typeof promise.catch === 'function') promise.catch(() => {})
+        clientLog('np:exit-fullscreen', { reason: String(reason || 'close') })
+        return true
+      } catch (err) {
+        return false
+      }
+    }
+
     function closeNowPlaying() {
       if (!npOpen) return
+      /* 离开播放页必须退出原生全屏，否则用户会被困在全屏层 */
+      exitNativeFullscreen('close')
       npOpen = false
       emitNpOpen()
     }
@@ -2008,6 +2043,43 @@ window.__ModuleLoader__.load({
 
     function useNpOpen() {
       return useSyncStore(subscribeNpOpen, getNpOpen)
+    }
+
+    /* 原生全屏：单曲行「全屏播放」→ 播放 + 打开 NP + 请求 requestFullscreen */
+    let npRootEl = null
+    let pendingFullscreen = false
+
+    function requestFullscreenOn(node) {
+      try {
+        if (!node || typeof node.requestFullscreen !== 'function') return false
+        if (document.fullscreenElement) return true
+        const promise = node.requestFullscreen()
+        if (promise && typeof promise.catch === 'function') promise.catch(() => {})
+        return true
+      } catch (err) {
+        return false
+      }
+    }
+
+    function consumePendingFullscreen() {
+      if (!pendingFullscreen) return false
+      pendingFullscreen = false
+      return true
+    }
+
+    function enterFullscreenPlayback(playFn) {
+      try {
+        if (typeof playFn === 'function') playFn()
+      } catch (err) {
+        /* ignore */
+      }
+      openNowPlaying()
+      if (npRootEl && !document.fullscreenElement) {
+        pendingFullscreen = false
+        requestFullscreenOn(npRootEl)
+      } else if (!npRootEl) {
+        pendingFullscreen = true
+      }
     }
 
     let npMode = safeRead('netease-music:np-mode') === 'lyrics' ? 'lyrics' : 'vinyl'
@@ -2284,11 +2356,16 @@ window.__ModuleLoader__.load({
       note: { paths: ['M9 18a2.6 2.6 0 1 1-2.6-2.6c.47 0 .92.13 1.3.35V6.5l9.9-2.1v9.3a2.6 2.6 0 1 1-2.6-2.6c.47 0 .92.13 1.3.35V7.4l-7.3 1.55z'] },
       heart: { paths: ['M12 21.2 10.55 19.9C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.4z'] },
       heartO: { stroke: true, w: 1.75, paths: ['M12 20.15 10.9 19.2C5.9 14.8 2.6 11.85 2.6 8.35c0-2.7 2.1-4.8 4.8-4.8 1.56 0 3.07.73 4.6 2.08 1.53-1.35 3.04-2.08 4.6-2.08 2.7 0 4.8 2.1 4.8 4.8 0 3.5-3.3 6.45-8.3 10.85z'] },
+      repeat: { stroke: true, paths: ['M17 2l4 4-4 4', 'M3 11V9a4 4 0 0 1 4-4h14', 'M7 22l-4-4 4-4', 'M21 13v2a4 4 0 0 1-4 4H3'] },
+      repeatOne: { stroke: true, paths: ['M17 2l4 4-4 4', 'M3 11V9a4 4 0 0 1 4-4h14', 'M7 22l-4-4 4-4', 'M21 13v2a4 4 0 0 1-4 4H3', 'M11 10h1v4'] },
+      shuffle: { stroke: true, paths: ['M16 3h5v5', 'M4 20 21 3', 'M21 16v5h-5', 'M15 15l6 6', 'M4 4l5 5'] },
+      order: { stroke: true, paths: ['M4 6h9', 'M4 12h9', 'M4 18h9', 'M15.5 8.5 19 12l-3.5 3.5', 'M19 12h-4'] },
       alert: { stroke: true, paths: ['M12 4.4 21 20H3z', 'M12 10v4.2', 'M12 17.2h.01'] },
       plus: { stroke: true, paths: ['M12 5v14', 'M5 12h14'] },
       disc: { stroke: true, paths: ['M12 3.5a8.5 8.5 0 1 0 0 17 8.5 8.5 0 0 0 0-17z', 'M12 9.2a2.8 2.8 0 1 0 0 5.6 2.8 2.8 0 0 0 0-5.6z'] },
       lyrics: { stroke: true, paths: ['M4.5 7h9', 'M4.5 12h9', 'M4.5 17h5.5', 'M18.4 6.2v7.1', 'M18.4 13.3a2.1 2.1 0 1 0-2.1-2.1'] },
       expand: { stroke: true, paths: ['M9.5 4.5H4.5v5', 'M14.5 4.5h5v5', 'M9.5 19.5H4.5v-5', 'M14.5 19.5h5v-5'] },
+      openPanel: { stroke: true, w: 1.8, paths: ['M4 5.5h16v13H4z', 'M9 10.2l3-3 3 3', 'M12 7.2v6'] },
       check: { stroke: true, paths: ['M5 12.6l4.6 4.6L19 7.2'], w: 2.2 },
       logout: { stroke: true, paths: ['M15 5h3.2A1.8 1.8 0 0 1 20 6.8v10.4a1.8 1.8 0 0 1-1.8 1.8H15', 'M10.5 8 6.5 12l4 4', 'M6.5 12H15.5'] },
     }
@@ -2452,8 +2529,8 @@ window.__ModuleLoader__.load({
             playing: playing && currentId === String(track.id),
             onOpenArtist,
             onPlay: () => {
+              /* 列表内点歌只在当前页播放，不自动跳进播放页；进 NP 只走 dock 封面/打开播放页/全屏按钮 */
               player.playQueue(tracks, index, contextTitle)
-              openNowPlaying()
             },
             onQueue: () => player.enqueue(track),
           }))),
@@ -2496,6 +2573,17 @@ window.__ModuleLoader__.load({
       h('div', { className: 'nm-track-album', title: track.album || '' }, track.album || ''),
       h('div', { className: 'nm-track-time' }, fmtTime(track.duration)),
       h('div', { className: 'nm-track-actions' },
+        h('button', {
+          type: 'button',
+          className: 'nm-icon-btn nm-track-fullscreen',
+          'data-nm': 'row-fullscreen',
+          title: t('action.fullscreen'),
+          'aria-label': t('action.fullscreen') + ' ' + track.name,
+          onClick: (event) => {
+            event.stopPropagation()
+            enterFullscreenPlayback(props.onPlay)
+          },
+        }, h(Icon, { name: 'expand', size: 14 })),
         h('button', {
           type: 'button',
           className: 'nm-icon-btn nm-track-play',
@@ -3918,6 +4006,16 @@ window.__ModuleLoader__.load({
                 className: 'nm-volume-slider',
                 onCommit: (ratio) => player.setVolume(ratio),
               })),
+          h('button', {
+            type: 'button',
+            className: 'nm-icon-btn nm-dock-mode-btn',
+            'data-nm': 'play-mode',
+            title: t('playMode.' + (snapshot.playMode || 'list')),
+            'aria-label': t('playMode.' + (snapshot.playMode || 'list')),
+            onClick: () => player.cyclePlayMode(),
+          },
+          h(Icon, { name: playModeIcon(snapshot.playMode), size: 15 }),
+          h('span', { className: 'nm-dock-mode-text' }, t('playMode.' + (snapshot.playMode || 'list')))),
           h('div', { className: 'nm-dock-quality-anchor', ref: qualityAnchorRef },
             h('button', {
               type: 'button',
@@ -3947,7 +4045,7 @@ window.__ModuleLoader__.load({
             'aria-label': t('player.openNowPlaying'),
             'data-nm': 'dock-expand',
             onClick: enterNowPlayingFromDock,
-          }, h(Icon, { name: 'expand', size: 14 })),
+          }, h(Icon, { name: 'openPanel', size: 14 })),
           null))))
     }
 
@@ -3977,6 +4075,8 @@ window.__ModuleLoader__.load({
       const mode = useNpMode()
       const auth = useAuthInfo()
       const [qualityOpen, setQualityOpen] = React.useState(false)
+      const [fullscreen, setFullscreen] = React.useState(false)
+      const rootRef = React.useRef(null)
       const qualityAnchorRef = React.useRef(null)
       const scrollRef = React.useRef(null)
       const lineRefs = React.useRef([])
@@ -4008,11 +4108,47 @@ window.__ModuleLoader__.load({
         if (!track) closeNowPlaying()
       }, [track])
 
+      React.useEffect(() => {
+        const onChange = () => {
+          try {
+            const active = document.fullscreenElement
+            setFullscreen(!!active && (active === npRootEl || (!!rootRef.current && active.contains(rootRef.current))))
+          } catch (err) {
+            setFullscreen(false)
+          }
+        }
+        onChange()
+        document.addEventListener('fullscreenchange', onChange)
+        return () => document.removeEventListener('fullscreenchange', onChange)
+      }, [])
+
+      const toggleFullscreen = () => {
+        try {
+          /* 用组件自身的 fullscreen 状态驱动，避免 headless/stub 下 fullscreenElement 不更新导致按钮不切换 */
+          if (fullscreen || document.fullscreenElement) {
+            setFullscreen(false)
+            const promise = document.exitFullscreen()
+            if (promise && typeof promise.catch === 'function') promise.catch(() => {})
+          } else {
+            setFullscreen(true)
+            requestFullscreenOn(npRootEl || rootRef.current)
+          }
+        } catch (err) {
+          setFullscreen(false)
+        }
+      }
+
       const qualityOpenRef = React.useRef(qualityOpen)
       qualityOpenRef.current = qualityOpen
       React.useEffect(() => {
         const onKey = (event) => {
           if (event.key !== 'Escape') return
+          /* 原生全屏时 Esc 交给浏览器退出全屏，不关闭播放页 */
+          try {
+            if (document.fullscreenElement) return
+          } catch (err) {
+            /* ignore */
+          }
           if (qualityOpenRef.current) {
             setQualityOpen(false)
             return
@@ -4157,6 +4293,16 @@ window.__ModuleLoader__.load({
               'data-nm': 'np-mode-lyrics',
               onClick: () => setNpMode('lyrics'),
             }, h(Icon, { name: 'lyrics', size: 14 }), t('np.lyrics'))),
+          h('button', {
+            type: 'button',
+            className: 'nm-btn nm-np-playmode-btn',
+            'data-nm': 'play-mode',
+            title: t('playMode.' + (snapshot.playMode || 'list')),
+            'aria-label': t('playMode.' + (snapshot.playMode || 'list')),
+            onClick: () => player.cyclePlayMode(),
+          },
+          h(Icon, { name: playModeIcon(snapshot.playMode), size: 14 }),
+          h('span', null, t('playMode.' + (snapshot.playMode || 'list')))),
           h('div', { className: 'nm-np-quality-anchor', ref: qualityAnchorRef },
             h('button', {
               type: 'button',
@@ -4173,7 +4319,16 @@ window.__ModuleLoader__.load({
             title: t('action.queue'),
             'aria-label': t('action.queue'),
             onClick: () => player.toggleQueue(),
-          }, h(Icon, { name: 'queue', size: 16 }))))
+          }, h(Icon, { name: 'queue', size: 16 })),
+          h('button', {
+            type: 'button',
+            className: 'nm-icon-btn nm-np-fullscreen-btn',
+            'data-nm': 'np-fullscreen',
+            title: fullscreen ? t('np.exitFullscreen') : t('np.fullscreen'),
+            'aria-label': fullscreen ? t('np.exitFullscreen') : t('np.fullscreen'),
+            'aria-pressed': fullscreen ? 'true' : 'false',
+            onClick: toggleFullscreen,
+          }, h(Icon, { name: fullscreen ? 'close' : 'expand', size: 16 }))))
 
       const stage = mode === 'vinyl'
         ? h('div', { className: 'nm-np-stage is-vinyl', 'data-nm': 'np-mode', 'data-mode': 'vinyl' },
@@ -4200,7 +4355,8 @@ window.__ModuleLoader__.load({
           h('div', { className: 'nm-np-lyrics', 'data-nm': 'np-lyrics', ref: scrollRef }, lyricsBody))
 
       return h('div', {
-        className: 'nm-np',
+        ref: rootRef,
+        className: cx('nm-np', fullscreen && 'is-fullscreen'),
         'data-nm': 'nowplaying',
         'data-mode': mode,
         'data-playing': playing ? 'true' : 'false',
@@ -4335,6 +4491,7 @@ window.__ModuleLoader__.load({
       const t = useT()
       const rootRef = React.useRef(null)
       const scrollRef = React.useRef(null)
+      const searchPageRef = React.useRef(null)
       const [tab, setTab] = React.useState('recommend')
       const [stack, setStack] = React.useState([])
       const [query, setQuery] = React.useState('')
@@ -4351,7 +4508,30 @@ window.__ModuleLoader__.load({
           setUiToast(null)
         }
       }, [])
+      React.useEffect(() => {
+        if (tab !== 'search') return undefined
+        const timer = setTimeout(() => {
+          try {
+            if (searchPageRef.current) searchPageRef.current.focus()
+          } catch (err) {
+            /* ignore */
+          }
+        }, 40)
+        return () => clearTimeout(timer)
+      }, [tab])
       const npIsOpen = useNpOpen()
+
+      React.useEffect(() => {
+        if (!npIsOpen) {
+          npRootEl = null
+          return undefined
+        }
+        npRootEl = rootRef.current
+        if (consumePendingFullscreen()) requestFullscreenOn(npRootEl)
+        return () => {
+          if (npRootEl === rootRef.current) npRootEl = null
+        }
+      }, [npIsOpen])
       const [install, setInstall] = React.useState({ state: 'idle', phase: '', lines: [], error: '' })
       const [installStarting, setInstallStarting] = React.useState(false)
       const installAlive = React.useRef(true)
@@ -4789,7 +4969,46 @@ window.__ModuleLoader__.load({
             onPlay: () => playCollection('artist', artist),
           })))))
 
-      const renderSearch = () => h(SearchView, {
+      const renderSearch = () => h(React.Fragment, null,
+        h('div', { className: 'nm-search-page' },
+          h('label', { className: 'nm-search-page-box' },
+            h(Icon, { name: 'search', size: 19 }),
+            h('input', {
+              ref: searchPageRef,
+              className: 'nm-search-page-input',
+              type: 'search',
+              value: query,
+              placeholder: t('search.placeholder'),
+              'aria-label': t('search.placeholder'),
+              'data-nm': 'search-page-input',
+              autoFocus: true,
+              spellCheck: false,
+              onChange: (event) => setQuery(event.target.value),
+              onKeyDown: (event) => {
+                if (event.key === 'Escape') setQuery('')
+                if (event.key === 'Enter') {
+                  event.preventDefault()
+                  try {
+                    if (searchPageRef.current) searchPageRef.current.blur()
+                  } catch (err) {
+                    /* ignore */
+                  }
+                }
+              },
+            })),
+          h('button', {
+            type: 'button',
+            className: 'nm-btn accent nm-search-page-btn',
+            'data-nm': 'search-page-submit',
+            onClick: () => {
+              try {
+                if (searchPageRef.current) searchPageRef.current.blur()
+              } catch (err) {
+                /* ignore */
+              }
+            },
+          }, h(Icon, { name: 'search', size: 15 }), t('action.search'))),
+        h(SearchView, {
         t,
         query,
         type: searchType,
@@ -4798,7 +5017,7 @@ window.__ModuleLoader__.load({
         onOpenArtist: openArtist,
         onOpen: openDetail,
         onPlay: playCollection,
-      })
+      }))
 
       let body = null
       if (detail) {
@@ -4862,7 +5081,7 @@ window.__ModuleLoader__.load({
               }) : null,
               showLoginBanner && !engineBroken ? h(LoginBanner, { t, onLogin: openLogin }) : null,
               showBody || detail ? body : null),
-            h('div', { className: 'nm-build-stamp', 'data-nm': 'build-stamp' }, t('footer.updated') + ' ' + CLIENT_BUILD + ' · ' + (status.data ? (authed ? '登录态：已登录' : '登录态：未登录') : (status.error ? '登录态：读取失败' : '登录态：加载中'))))),
+            h('div', { className: 'nm-build-stamp', 'data-nm': 'build-stamp' }, t('footer.updated') + ' ' + CLIENT_BUILD))),
         h(PlayerDock),
         loginOpen
           ? h(LoginModal, {
@@ -5026,6 +5245,22 @@ window.__ModuleLoader__.load({
     }
     .nm-search-input::placeholder{color:var(--nm-t3)}
     .nm-search-input::-webkit-search-cancel-button{display:none}
+    .nm-search-page{display:flex;align-items:center;gap:10px;margin:18px 0 14px;width:100%}
+    .nm-search-page-box{flex:1 1 auto;min-width:0;display:flex;align-items:center;gap:11px;height:46px;
+      padding:0 16px;border-radius:12px;border:1px solid var(--nm-line);background:var(--nm-l2);
+      color:var(--nm-t2);transition:border-color .16s ease,background .16s ease,box-shadow .16s ease}
+    .nm-search-page-box:focus-within{border-color:color-mix(in srgb,var(--nm-accent) 62%,var(--nm-line));
+      background:var(--nm-l1);box-shadow:0 0 0 3px color-mix(in srgb,var(--nm-accent) 14%,transparent)}
+    .nm-search-page-input{flex:1 1 auto;min-width:0;height:100%;border:0;outline:none;background:transparent;
+      color:var(--nm-t1);font-size:15px;font-weight:500;letter-spacing:-.01em}
+    .nm-search-page-input::placeholder{color:var(--nm-t3)}
+    .nm-search-page-input::-webkit-search-cancel-button{display:none}
+    .nm-search-page-btn{height:46px;padding:0 18px;border-radius:12px;flex:0 0 auto;gap:7px;font-size:13px}
+    @media (max-width:600px){
+      .nm-search-page{margin:14px 0 12px;gap:8px;flex-wrap:wrap}
+      .nm-search-page-box{flex:1 1 100%;order:1;height:44px;padding:0 13px}
+      .nm-search-page-btn{order:2;height:42px;padding:0 14px;margin-left:auto}
+    }
     .nm-search-clear{
       width:18px;height:18px;border-radius:50%;border:0;background:var(--nm-fill2);color:var(--nm-t2);
       display:grid;place-items:center;cursor:pointer;flex:none;padding:0;
@@ -5495,6 +5730,9 @@ window.__ModuleLoader__.load({
 
     /* ---------- 音质菜单 ---------- */
     .nm-dock-quality-anchor,.nm-np-quality-anchor{position:relative;display:flex;align-items:center}
+    .nm-dock-mode-btn{width:auto;min-width:28px;padding:0 6px;gap:5px;display:inline-flex;align-items:center}
+    .nm-dock-mode-text{font-size:10.5px;font-weight:600;color:var(--nm-t2);white-space:nowrap}
+    .nm-np-playmode-btn{padding:0 9px;gap:5px;font-size:11px;white-space:nowrap}
     .nm-dock-quality-btn{
       display:inline-flex;align-items:center;gap:5px;height:28px;padding:0 10px;border-radius:999px;
       border:1px solid var(--nm-line);background:color-mix(in srgb,var(--nm-l1) 55%,transparent);
@@ -5531,6 +5769,18 @@ window.__ModuleLoader__.load({
     .nm-quality-option .nm-ico{color:var(--nm-accent)}
 
     /* ---------- 全屏播放页（Now Playing） ---------- */
+    [data-nm="root"]:fullscreen,
+    .nm-root:fullscreen{
+      width:100vw;height:100vh;max-width:none;max-height:none;border-radius:0;
+      background:var(--nm-bg);overflow:hidden;
+    }
+    .nm-np:fullscreen,
+    .nm-np-shell:fullscreen{
+      width:100vw;height:100vh;max-width:none;max-height:none;border-radius:0;
+      background:var(--nm-bg);overflow:hidden;
+    }
+    .nm-np:fullscreen .nm-np-stage,
+    .nm-np-shell:fullscreen .nm-np-stage{min-height:0}
     .nm-np{
       position:relative;height:100%;min-height:100%;display:flex;flex-direction:column;
       padding:calc(var(--dsh-frame-top-clearance,48px) + 6px) 30px 16px;
@@ -5867,6 +6117,9 @@ window.__ModuleLoader__.load({
       .nm-detail-desc{-webkit-line-clamp:2}
     }
     @media (max-width:900px){
+      .nm-dock-mode-text,
+      .nm-np-playmode-btn span{display:none}
+      .nm-np-playmode-btn{padding:0 8px}
       .nm-carousel-card{min-height:252px;padding:24px 24px 24px 60px}
       .nm-carousel-copy{max-width:62%}
       .nm-carousel-collage{width:38%;right:3%}
@@ -6006,6 +6259,13 @@ window.__ModuleLoader__.load({
       .nm-np-title{font-size:21px}
       .nm-np-lyrics-head{padding:13px 16px 8px}
     }
+    @media (max-width:660px){
+      .nm-search-page{display:flex !important;flex-wrap:wrap !important;align-items:stretch !important}
+      .nm-search-page-box{flex:1 1 100% !important;order:1 !important;padding:0 12px !important}
+      .nm-search-page-box > .nm-ico{display:none !important}
+      .nm-search-page-input{width:100% !important}
+      .nm-search-page-btn{order:2 !important;height:40px !important;margin-left:auto !important}
+    }
     @media (prefers-reduced-motion:reduce){
       .nm-root *,.nm-dock-root *,.nm-modal-root *{
         animation-duration:.001ms !important;animation-iteration-count:1 !important;
@@ -6041,7 +6301,6 @@ window.__ModuleLoader__.load({
         effect(() => {
           const audio = document.createElement('audio')
           try { audio.dataset.nmAudioId = String(Date.now()) + '-' + Math.random().toString(36).slice(2, 6) } catch (err) { /* ignore */ }
-          clientLog('audio:created', { audioId: audio.dataset ? audio.dataset.nmAudioId : null })
           audio.preload = 'metadata'
           audio.setAttribute('data-nm-audio', '')
           audio.style.display = 'none'
@@ -6100,6 +6359,15 @@ window.__ModuleLoader__.load({
             window.removeEventListener('pointercancel', notify)
           }
         }, 'netease-music: seek pointer guard')
+
+        /* 2.4) 全屏兜底：NP 已关闭但浏览器仍在原生全屏时主动退出 */
+        effect(() => {
+          const off = subscribeNpOpen(() => {
+            if (npOpen) return
+            exitNativeFullscreen('np-closed')
+          })
+          return () => off()
+        }, 'netease-music: np fullscreen exit guard')
 
         /* 2.5) Agent 播放桥：轮询 Host 命令 + 上报播放状态（不依赖面板可见） */
         effect(() => {

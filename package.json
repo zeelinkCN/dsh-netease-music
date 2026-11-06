@@ -1,6 +1,6 @@
 {
   "name": "@local/netease-music",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "description": "Netease Cloud Music (网易云音乐) — a DeepSeek Harness desktop plugin: QR sign-in, daily recommendations, playlists, artists, search and an always-visible bottom player dock.",

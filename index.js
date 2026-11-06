@@ -468,11 +468,6 @@ export function apply(ctx) {
         if (!res.headersSent) res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
       } catch (err) { /* ignore */ }
       const url = new URL(req.url ?? '/', 'http://127.0.0.1')
-      try {
-        if (url.pathname === '/netease-panel/api/status' || url.pathname === '/netease-panel/api/httpbase') {
-          log('[api-req]', req.method, url.pathname, url.search.slice(0, 60), 'ua=' + String(req.headers['user-agent'] || '').slice(0, 40))
-        }
-      } catch (err) { /* ignore */ }
       const data = await handler(url, req, res)
       if (res.writableEnded) return
       ok(res, data)
@@ -513,15 +508,6 @@ export function apply(ctx) {
 
     const controller = new AbortController()
     res.on('close', () => controller.abort())
-    log(
-      '[audio-req]',
-      'id=' + id,
-      'level=' + level,
-      'range=' + String(req.headers.range || '-').slice(0, 40),
-      'ifRange=' + String(req.headers['if-range'] || '-').slice(0, 20),
-      'ifNoneMatch=' + String(req.headers['if-none-match'] || '-').slice(0, 20),
-      'accept=' + String(req.headers.accept || '-').slice(0, 40),
-    )
     const headers = { 'User-Agent': UA, Referer: 'https://music.163.com/' }
     const rawRange = String(req.headers.range || '')
     const fullRange = /^bytes=0-$/.test(rawRange.trim())
@@ -556,14 +542,6 @@ export function apply(ctx) {
     // 音频流绝不能进浏览器缓存：被中断的局部响应被复用会让 <audio> 判定 seekable=[0,0]
     res.setHeader('Cache-Control', 'no-store, no-transform')
     res.setHeader('Pragma', 'no-cache')
-    log(
-      '[audio-resp]',
-      'id=' + id,
-      'status=' + res.statusCode,
-      'len=' + String(res.getHeader('content-length') || '-'),
-      'range=' + String(res.getHeader('content-range') || '-').slice(0, 40),
-      'acceptRanges=' + String(res.getHeader('accept-ranges') || '-'),
-    )
     try {
       for await (const chunk of upstream.body) {
         if (res.writableEnded) break
@@ -690,16 +668,6 @@ export function apply(ctx) {
     const data = await bridge.call('daily', {}, { timeoutMs: 40_000 })
     return { songs: (data && data.songs) || [], title: '每日推荐', subtitle: '' }
   }
-
-  try {
-    const ws = ctx.webServer || {}
-    let port = ws.port
-    try {
-      if (!port && ws.server && typeof ws.server.address === 'function') port = (ws.server.address() || {}).port
-    } catch (err) { /* ignore */ }
-    log('[host] webServer keys=' + JSON.stringify(Object.keys(ws)) + ' port=' + String(port) +
-      ' serverKeys=' + JSON.stringify(ws.server ? Object.keys(ws.server) : []))
-  } catch (err) { /* ignore */ }
 
   ctx.effect(() => {
     const tools = ctx.get('tools')
@@ -954,35 +922,6 @@ export function apply(ctx) {
         wrap(async () => ({ base: localHttpBase() })),
       ),
 
-      /* 临时诊断页：同源 + 各种 audio 创建方式的 seekable 对比（排查完删除） */
-      route(
-        'testpage',
-        (req, res) => {
-          const id = String(new URL(req.url || '/', 'http://x').searchParams.get('id') || '3456695878')
-          res.statusCode = 200
-          res.setHeader('Content-Type', 'text/html; charset=utf-8')
-          res.end(`<!doctype html><meta charset="utf-8"><title>seek test</title>
-<audio id="a1" preload="metadata" src="/netease-panel/api/audio?id=${id}&level=standard&_=1"></audio>
-<script>
-const a2 = document.createElement('audio')
-a2.preload = 'metadata'
-a2.src = '/netease-panel/api/audio?id=${id}&level=standard&_=2'
-document.body.appendChild(a2)
-const a3 = document.createElement('audio')
-a3.preload = 'metadata'
-a3.style.display = 'none'
-a3.src = '/netease-panel/api/audio?id=${id}&level=standard&_=3'
-document.body.appendChild(a3)
-window.__info = () => [1,2,3].map((n) => {
-  const a = document.getElementById('a' + n) || document.querySelectorAll('audio')[n - 1]
-  return { n, duration: a && a.duration, readyState: a && a.readyState, seekable: a && a.seekable.length ? [a.seekable.start(0), a.seekable.end(0)] : [], networkState: a && a.networkState }
-})
-window.__play = () => Promise.all([1,2,3].map((n) => { const a = document.querySelectorAll('audio')[n-1]; return a.play().catch(() => {}) }))
-window.__seek = (n, t) => { const a = document.querySelectorAll('audio')[n-1]; try { a.currentTime = t } catch (e) { return String(e) } }
-</script>`)
-        },
-      ),
-
       /* 客户端诊断日志（临时/低频）：客户端把关键事件 POST 到这里，落到 bridge.log 便于真机排查 */
       route(
         'clientlog',
@@ -1058,7 +997,6 @@ window.__seek = (n, t) => { const a = document.querySelectorAll('audio')[n-1]; t
           try {
             const status = await bridge.call('status', {}, { timeoutMs: 20_000 })
             try {
-              log('[status-resp]', 'authed=' + String(status && status.authed), 'nickname=' + String((status && status.nickname) || ''))
               lastAuth = {
                 authed: !!(status && status.authed),
                 nickname: (status && status.nickname) || null,

@@ -6,7 +6,7 @@
 
 仓库：<https://github.com/zeelinkCN/dsh-netease-music>
 
-![version](https://img.shields.io/badge/version-1.0.0-ec4141) ![UI](https://img.shields.io/badge/UI-Apple%20Music%20style-111) ![login](https://img.shields.io/badge/%E7%99%BB%E5%BD%95-%E6%89%AB%E7%A0%81-C20C0C) ![license](https://img.shields.io/badge/license-MIT-blue)
+![version](https://img.shields.io/badge/version-1.1.0-ec4141) ![UI](https://img.shields.io/badge/UI-Apple%20Music%20style-111) ![login](https://img.shields.io/badge/%E7%99%BB%E5%BD%95-%E6%89%AB%E7%A0%81-C20C0C) ![license](https://img.shields.io/badge/license-MIT-blue)
 
 ## 功能
 
@@ -20,6 +20,11 @@
 - **播放条不挡工作区**
   - 在网易云面板里：页面底部内嵌一条 dock（占自己的布局行，不遮列表、不悬浮）。
   - 回到对话/其它面板：只在**左侧栏 Settings 上方**显示占满侧栏宽度的迷你播放器（封面 + 歌名 + 上一首/播放/下一首 + 喇叭音量滑杆，2px 进度贴底）；侧栏收起成 56px 时只留封面按钮。
+- **原生全屏播放**：播放页右上角「全屏」按钮调用浏览器原生 Fullscreen API（真·整个屏幕，覆盖侧栏/聊天/菜单栏）；曲目行「全屏播放」按钮 = 播放 + 播放页 + 自动全屏；Esc 先退全屏（播放页保留），返回键 = 退全屏 + 关播放页 + 回列表，任何路径离开播放页都会退出全屏，不会被困住。
+- **播放模式**：顺序播放 / 列表循环 / 单曲循环 / 随机播放，播放条与全屏页各一个模式按钮（图标+文字，窄屏只图标），选择会记住；随机模式保留历史供「上一首」回退。
+- **列表点歌不跳页**：在歌单/搜索/推荐/专辑列表点歌只开始播放并更新底部播放条，**停留在当前列表**可连续点歌；进播放页只由用户主动点封面/「打开播放页」/行内「全屏播放」触发。
+- **搜索页大搜索框**：切到「搜索」tab 内容区顶部有通栏大搜索框（自动聚焦、回车搜索、与顶部搜索框同步），不再只有空状态提示。
+- **图标语义区分**：「打开播放页」用矩形+上箭头图标，四角括号只用于真全屏，避免误触。
 - **收藏红心**：曲目行悬停、播放页歌名旁、底部播放条各有一颗红心，点一下收藏到「我喜欢的音乐」（实心=已收藏），三处状态实时同步；未登录会提示先登录。
 - **扫码登录**：面板内直接出二维码，手机网易云 App 扫一扫；登录态只存在本机，会员账号解锁高音质。
 - **三种听歌入口**：推荐（今日推荐 / 推荐歌单 / 收藏歌手）、歌单（我的/收藏，全量曲目）、搜索（单曲/歌单/歌手/专辑）；另有歌单 / 专辑 / 歌手详情页。
@@ -48,7 +53,7 @@ dsh-netease-music/
 ├── server/installer.mjs  # 引擎无感安装器（clone + venv + pip，跨 macOS/Linux/Windows）
 ├── server/selftest.mjs   # 引擎自测（真实网络，41 项）
 ├── engine/cloud-music-mcp/   # 上游 MCP 仓库 + .venv（安装时自动生成，不进仓库）
-├── selftest/             # 浏览器端验收 harness（headless Chrome，342 项断言）
+├── selftest/             # 浏览器端验收 harness（headless Chrome，432 项断言）
 ├── docs/                 # CONTRACT.md 契约 + 截图
 ├── locale/{zh,en}.json   # 插件管理页展示文案
 └── assets/icon*.png      # 官方网易云红标（插件管理页图标）
@@ -135,11 +140,14 @@ Host 侧支持环境变量（一般不需要）：
 - 引擎自测（真实网络，登录态）：`cd dsh-netease-music && node server/selftest.mjs` → **41/41**（含 like 收藏、模式接口、匿名降级、回滚不污染收藏）。
 - Host 冒烟：`node --check index.js` + 假引擎/假 ctx 驱动路由与 Agent 工具（工具定义、守卫、命令队列、状态上报）。
 - 真实联调：真实 bridge + 真实网易云音源；headless Chrome 里 `<audio>` 真实播放 mp3/FLAC（无损 1.5 Mbps），`currentTime` 前进、`readyState=4`。
-- 浏览器端验收：`cd selftest && node run.mjs` → **PASS 342 / FAIL 0**（headless Chrome CDP，39 张截图）。
+- 浏览器端验收：`cd selftest && node run.mjs` → **PASS 432 / FAIL 0**（headless Chrome CDP，43 张截图）。
 - 侧栏图标：官方网易云红底白色音符标志，128px PNG 内联为 dataURL（`client.js` 的 `ICON_DATA`），深/浅色都保持红色；插件管理页图标为 `assets/icon.png`。
 
 ## 截图
 
+![搜索页大搜索框](docs/screenshot-search-page.png)
+![播放模式与底部播放条](docs/screenshot-play-mode.png)
+![全屏播放页（原生 Fullscreen）](docs/screenshot-nowplaying-fullscreen.png)
 ![侧栏图标（深色）](docs/sidebar-icon-dark.png)
 ![首页轮播·心动模式](docs/screenshot-hero-carousel.png)
 ![轮播绕回动画](docs/screenshot-carousel-wrap.png)
@@ -160,3 +168,8 @@ Host 侧支持环境变量（一般不需要）：
 - 歌词为标准 LRC 同步（非逐字），暂无「歌词/写真」等更多播放页皮肤。
 - 迷你播放器依赖 Harness 的 `sidebar.footer.action` 槽；若宿主改版/收起侧栏，位置会随之变化（已同时适配 56px rail）。
 
+## License
+
+[MIT](LICENSE) © zeelinkCN
+
+网易云音乐名称、图标与相关商标归网易公司所有，本插件与网易公司无隶属关系；官方红标仅用于本机识别。详见 [NOTICE](NOTICE)。

@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.1.0 — 2026-11-06
+
+修复「界面永远显示未登录」「进度条拖不动」两个真机问题，并在搜索页加醒目搜索框。
+
+- **登录态显示修复（根因）**：`useStatus` 中误用了作用域外的 `adoptHttpBase`，每次读取 `/status` 都抛 `ReferenceError`，界面因此一直判定「登录态读取失败」→ 长期显示「扫码登录」按钮与登录横幅。改为 `player.adoptHttpBase(...)`，并用轻量 `/auth` 快照做兜底。
+- **进度条无法拖动修复（根因）**：App 页面运行在 `dsh-app://` 自定义协议下，媒体请求经该协议转发会丢 `Content-Length`，浏览器因此判定 `<audio>` 不可 seek（`seekable=[0,0]`）。音频改为走真实 HTTP 绝对地址（`http://127.0.0.1:<port>/netease-panel/api/audio`，由 `/status.httpBase` 提供），并保留自愈重建、日志与 5s 节流。
+- **音频代理**：整段请求回 200（不再回 206 全量）、`Cache-Control: no-store`、不转发 ETag、支持 CORS，避免浏览器复用被中断的局部缓存。
+- **搜索页**：切到「搜索」tab 后内容区新增通栏大搜索框（自动聚焦、Enter 搜索、与顶部搜索框同步），不再只有空状态提示。
+- **可维护性**：新增 `/httpbase`、`/auth`、`/clientmodules`（诊断/热重建客户端 bundle，无需重启 App）等本机接口；状态类响应统一 `no-store`。
+- 验收：浏览器端 harness 全量回归（新增搜索页搜索框断言）。
+
 ## v1.0.2 — 2026-11-06
 
 进度条拖动（音源被浏览器判定不可 seek）根因修复 + 自愈。

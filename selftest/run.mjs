@@ -1256,17 +1256,27 @@ try {
   } catch (err) {
     check('曲目行点击后恢复播放（播放整列表）', false, `data-playing=${await playerState()}`)
   }
-  // v2：点曲目行会进入全屏播放页；退出后再继续后续场景
-  if (await evaluate(`!!document.querySelector('[data-nm="nowplaying"]')`)) {
-    await evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`)
-    try {
-      await waitFor(`!document.querySelector('[data-nm="nowplaying"]')`, 'exit nowplaying after row click', 6000)
-      check('播放页 Esc 返回列表（v2）', true)
-    } catch {
-      check('播放页 Esc 返回列表（v2）', false, 'Escape 后播放页仍在')
-      if (await evaluate(`!!document.querySelector('[data-nm="np-back"]')`)) await clickSel('[data-nm="np-back"]')
-      await sleep(400)
-    }
+  check('v1.1：点曲目行不自动打开播放页', !(await evaluate(`!!document.querySelector('[data-nm="nowplaying"]') && !!document.querySelector('[data-nm="nowplaying"]').offsetParent`)))
+  // 点 dock-expand 才进入播放页；Esc 返回列表
+  const expandClicked = await evaluate(`(() => {
+    const b = document.querySelector('[data-nm="dock-expand"]') || document.querySelector('[data-nm="dock-cover"]')
+    if (!b) return false
+    b.click()
+    return true
+  })()`)
+  check('点 dock-expand 进入播放页', !!expandClicked)
+  try {
+    await waitFor(`!!document.querySelector('[data-nm="nowplaying"]')`, 'np via dock expand', 6000)
+    check('dock-expand 后播放页出现', true)
+  } catch (err) {
+    check('dock-expand 后播放页出现', false, String(err))
+  }
+  await evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`)
+  try {
+    await waitFor(`!document.querySelector('[data-nm="nowplaying"]')`, 'exit nowplaying after dock expand', 6000)
+    check('播放页 Esc 返回列表（v1.1）', true)
+  } catch {
+    check('播放页 Esc 返回列表（v1.1）', false, 'Escape 后播放页仍在')
   }
 
   // 3s 短 WAV 播完 → ended → 自动下一首（队列下一首）
@@ -1282,6 +1292,80 @@ try {
       JSON.stringify({ beforeId: autoId, afterId: await audioTrackId() }))
   } catch (err) {
     check('试听结束自动下一首（ended → 队列下一首）', false, `10s 内 audio id 仍为 ${autoId}（未自动切歌）`)
+  }
+
+  console.log('\n[3b] v1.1 列表点歌只播放、不自动打开播放页')
+  await evaluate(`window.__setActivePanel('netease-music')`)
+  await scrollTop()
+  await sleep(300)
+  const activeTabBefore = await evaluate(`(() => { const t = document.querySelector('[data-nm="tab"][aria-selected="true"]'); return t ? t.getAttribute('data-tab') : null })()`)
+  const firstRowClick = await evaluate(`(() => {
+    const row = document.querySelector('[data-nm="track"]')
+    if (!row) return null
+    const r = row.getBoundingClientRect()
+    return { id: row.getAttribute('data-id'), x: Math.round(r.left + r.width * 0.5), y: Math.round(r.top + r.height / 2) }
+  })()`)
+  if (firstRowClick) {
+    await realClickAt(firstRowClick.x, firstRowClick.y)
+    try {
+      await waitFor(`(() => { const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio'); return !!a && !a.paused })()`, 'first row plays', 8000)
+      check('列表点第一首：audio 开始播放', true)
+    } catch (err) { check('列表点第一首：audio 开始播放', false, String(err)) }
+    check('列表点第一首：不打开播放页 [data-nm="nowplaying"]',
+      !(await evaluate(`!!document.querySelector('[data-nm="nowplaying"]')`)))
+    check('列表点第一首：无 np-overlay',
+      !(await evaluate(`!!document.querySelector('[data-nm="np-overlay"]')`)))
+    check('列表点第一首：dock 出现', await evaluate(`!!document.querySelector('[data-nm="dock"]')`))
+    check('列表点第一首：当前 tab/列表不变',
+      (await evaluate(`(() => { const t = document.querySelector('[data-nm="tab"][aria-selected="true"]'); return t ? t.getAttribute('data-tab') : null })()`)) === activeTabBefore)
+    // dock-expand 才打开 NP
+    const dockExpand = await evaluate(`(() => {
+      const b = document.querySelector('[data-nm="dock-expand"]')
+      if (!b) return null
+      const r = b.getBoundingClientRect()
+      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), title: b.getAttribute('title'), aria: b.getAttribute('aria-label') }
+    })()`)
+    check('dock 有 [data-nm="dock-expand"] 且文案「打开播放页」',
+      !!dockExpand && /打开播放页/.test((dockExpand.title || '') + (dockExpand.aria || '')), JSON.stringify(dockExpand))
+    if (dockExpand) await realClickAt(dockExpand.x, dockExpand.y)
+    try {
+      await waitFor(`!!document.querySelector('[data-nm="nowplaying"]')`, 'np via dock expand real', 6000)
+      check('点 dock-expand 才出现面板内播放页（非全屏）',
+        !(await evaluate(`!!document.fullscreenElement`)))
+    } catch (err) { check('点 dock-expand 才出现面板内播放页（非全屏）', false, String(err)) }
+    await evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`)
+    await sleep(500)
+    // 列表点第二首：切歌且仍在列表
+    const secondRow = await evaluate(`(() => {
+      const rows = [...document.querySelectorAll('[data-nm="track"]')]
+      const row = rows[1] || rows[0]
+      if (!row) return null
+      row.scrollIntoView({ block: 'center' })
+      const r = row.getBoundingClientRect()
+      return { id: row.getAttribute('data-id'), x: Math.round(r.left + r.width * 0.5), y: Math.round(r.top + r.height / 2) }
+    })()`)
+    if (secondRow) {
+      await realClickAt(secondRow.x, secondRow.y)
+      try {
+        await waitFor(`(() => {
+          const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio')
+          if (!a || a.paused) return false
+          const m = /[?&]id=(\\d+)/.exec(a.getAttribute('src') || '')
+          return !!m && m[1] === ${JSON.stringify('__SECOND__')}
+        })()`.replace('__SECOND__', String(secondRow.id)), 'second row plays', 8000)
+        check('列表点第二首：切到第二首播放', true)
+      } catch (err) {
+        check('列表点第二首：切到第二首播放', false, JSON.stringify({ want: secondRow.id, cur: await audioTrackId() }))
+      }
+      check('列表点第二首：仍停留在列表（无 NP）',
+        !(await evaluate(`!!document.querySelector('[data-nm="nowplaying"]')`)))
+    }
+    // 图标文案：row-fullscreen 为「全屏播放」
+    const rowFsTitle = await evaluate(`(() => { const b = document.querySelector('[data-nm="track"] [data-nm="row-fullscreen"]'); return b ? { title: b.getAttribute('title'), aria: b.getAttribute('aria-label') } : null })()`)
+    check('row-fullscreen 文案为「全屏播放」（区别于 dock-expand）',
+      !!rowFsTitle && /全屏/.test((rowFsTitle.title || '') + (rowFsTitle.aria || '')), JSON.stringify(rowFsTitle))
+  } else {
+    check('列表点第一首：audio 开始播放', false, '未找到曲目行')
   }
 
   console.log('\n[4] 歌单详情：点封面卡 → detail → 返回')
@@ -1396,6 +1480,149 @@ try {
       input.dispatchEvent(new Event('input', { bubbles: true }))
     })()`)
   }
+
+  console.log('\n[5b] v1.1 搜索页大搜索框：同步 / 自动 focus / Enter / 小屏')
+  if (await evaluate(`!!document.querySelector('[data-nm="tab"][data-tab="search"]')`)) {
+    await clickSel('[data-nm="tab"][data-tab="search"]')
+    await sleep(450)
+  }
+  const searchPageInfo = await evaluate(`(() => {
+    const el = document.querySelector('[data-nm="search-page-input"]')
+    const box = el ? el.closest('.nm-search-page-box') || el.parentElement : null
+    const submit = document.querySelector('[data-nm="search-page-submit"]')
+    const top = document.querySelector('[data-nm="search-input"]')
+    const br = box ? box.getBoundingClientRect() : null
+    const ir = el ? el.getBoundingClientRect() : null
+    const sr = submit ? submit.getBoundingClientRect() : null
+    const bg = box ? getComputedStyle(box).backgroundColor : null
+    const radius = box ? getComputedStyle(box).borderRadius : null
+    const icon = box ? box.querySelector('svg, [class*="icon"], i') : null
+    const subBg = submit ? getComputedStyle(submit).backgroundColor : null
+    return {
+      hasInput: !!el,
+      hasSubmit: !!submit,
+      hasTop: !!top,
+      boxW: br ? Math.round(br.width) : null,
+      boxH: br ? Math.round(br.height) : null,
+      inputW: ir ? Math.round(ir.width) : null,
+      submitW: sr ? Math.round(sr.width) : null,
+      radius,
+      hasIcon: !!icon,
+      submitBg: subBg,
+      submitText: submit ? (submit.textContent || '').trim() : null,
+      topValue: top ? top.value : null,
+      pageValue: el ? el.value : null,
+      active: document.activeElement === el,
+    }
+  })()`)
+  check('搜索 tab 出现 [data-nm="search-page-input"]', !!searchPageInfo && searchPageInfo.hasInput, JSON.stringify(searchPageInfo))
+  check('搜索页大输入框：高度 46–48、圆角 12、通栏（与提交按钮同排）',
+    !!searchPageInfo && searchPageInfo.boxH >= 45 && searchPageInfo.boxH <= 49 &&
+    /12px/.test(searchPageInfo.radius || '') && searchPageInfo.boxW > 400,
+    JSON.stringify(searchPageInfo))
+  check('搜索页大输入框左侧有搜索图标', !!searchPageInfo && searchPageInfo.hasIcon)
+  check('右侧 [data-nm="search-page-submit"] 红色「搜索」按钮',
+    !!searchPageInfo && searchPageInfo.hasSubmit && /rgb\(236,\s*65,\s*65\)|#ec4141|rgb\(236,65,65\)/i.test(searchPageInfo.submitBg || '') &&
+    /搜索/.test(searchPageInfo.submitText || ''), JSON.stringify(searchPageInfo))
+  check('切到搜索 tab 自动 focus 搜索页输入框', !!searchPageInfo && searchPageInfo.active, JSON.stringify({ active: searchPageInfo && searchPageInfo.active }))
+  await S('29-search-page.png')
+  // 共用 query：顶部输入 → 页内输入同步
+  await evaluate(`(() => {
+    const input = document.querySelector('[data-nm="search-input"]')
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+    setter.call(input, '周杰伦')
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    input.dispatchEvent(new Event('change', { bubbles: true }))
+  })()`)
+  await sleep(350)
+  let syncTopToPage = false
+  try {
+    await waitFor(`(() => { const el = document.querySelector('[data-nm="search-page-input"]'); return !!el && el.value === '周杰伦' })()`, 'query sync top->page', 4000)
+    syncTopToPage = true
+  } catch { /* 断言 */ }
+  check('顶部搜索框输入后 search-page-input value 同步', syncTopToPage)
+  // 页内输入 → 顶部同步
+  await evaluate(`(() => {
+    const input = document.querySelector('[data-nm="search-page-input"]')
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+    setter.call(input, '晴天')
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    input.dispatchEvent(new Event('change', { bubbles: true }))
+  })()`)
+  await sleep(350)
+  let syncPageToTop = false
+  try {
+    await waitFor(`(() => { const el = document.querySelector('[data-nm="search-input"]'); return !!el && el.value === '晴天' })()`, 'query sync page->top', 4000)
+    syncPageToTop = true
+  } catch { /* 断言 */ }
+  check('search-page-input 输入后顶部搜索框 value 同步', syncPageToTop)
+  // 页内输入 + Enter：结果出现（debounce 320ms）
+  await evaluate(`(() => {
+    const input = document.querySelector('[data-nm="search-page-input"]')
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+    setter.call(input, '周杰伦')
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }))
+  })()`)
+  let pageSearchOk = false
+  try {
+    await waitFor(`(() => {
+      const box = document.querySelector('[data-nm="search-results"]')
+      return !!box && box.querySelectorAll('[data-nm="track"]').length >= 1
+    })()`, 'search-page results', 6000)
+    pageSearchOk = true
+  } catch { /* 断言 */ }
+  check('搜索页输入关键词按 Enter 后结果出现（debounce 320ms）', pageSearchOk)
+  await S('30-search-page-results.png')
+  // 点搜索按钮也能触发（先清空为空态，再输入并按按钮）
+  await evaluate(`(() => {
+    const input = document.querySelector('[data-nm="search-page-input"]')
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+    setter.call(input, '')
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+  })()`)
+  await sleep(400)
+  await evaluate(`(() => {
+    const input = document.querySelector('[data-nm="search-page-input"]')
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+    setter.call(input, '稻香')
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    const btn = document.querySelector('[data-nm="search-page-submit"]')
+    if (btn) btn.click()
+  })()`)
+  let submitOk = false
+  try {
+    await waitFor(`(() => {
+      const box = document.querySelector('[data-nm="search-results"]')
+      return !!box && box.querySelectorAll('[data-nm="track"]').length >= 1
+    })()`, 'search-page submit results', 6000)
+    submitOk = true
+  } catch { /* 断言 */ }
+  check('点 search-page-submit 后结果出现', submitOk)
+  // 小屏 600：占满、无溢出、顶部搜索框仍存在
+  await setViewport(600, 900)
+  await sleep(500)
+  const smallSearch = await evaluate(`(() => {
+    const el = document.querySelector('[data-nm="search-page-input"]')
+    const page = el ? el.closest('.nm-search-page') : null
+    const top = document.querySelector('[data-nm="search-input"]')
+    const er = el ? el.getBoundingClientRect() : null
+    const pr = page ? page.getBoundingClientRect() : null
+    return {
+      hasInput: !!el,
+      hasTop: !!top,
+      inputW: er ? Math.round(er.width) : null,
+      pageW: pr ? Math.round(pr.width) : null,
+      sw: document.documentElement.scrollWidth,
+      cw: document.documentElement.clientWidth,
+    }
+  })()`)
+  check('600px 小屏搜索页输入框占满宽度且无横向溢出',
+    !!smallSearch && smallSearch.hasInput && smallSearch.inputW >= smallSearch.pageW * 0.9 &&
+    smallSearch.sw <= smallSearch.cw + 1, JSON.stringify(smallSearch))
+  check('600px 小屏顶部搜索框仍存在', !!smallSearch && smallSearch.hasTop)
+  await setViewport(1440, 980)
+  await sleep(400)
 
   console.log('\n[6] 主题与响应式：深色/浅色对比度 + 1440/1024/600 无横向溢出')
   const overflowInfo = () => evaluate(`({
@@ -1685,17 +1912,29 @@ try {
     dockLayout.dockBottom <= dockLayout.composerTop + 1, JSON.stringify(dockLayout))
   await S('19-inpanel-dock.png')
 
-  // 点曲目行 → 全屏播放页
+  // 点曲目行只播放；点 dock-expand 才进入播放页（v1.1）
   await scrollTop()
   const npEntry = await clickSel('[data-nm="section"][data-section="daily"] [data-nm="track"]')
   check('点曲目行', npEntry)
   let npReady = false
   try {
+    await waitFor(`!!document.querySelector('[data-nm="dock"]') && !document.querySelector('[data-nm="nowplaying"]')`, 'row plays without np', 6000)
+    check('点曲目行只播放、不自动打开播放页', true)
+  } catch (err) {
+    check('点曲目行只播放、不自动打开播放页', false, String(err))
+  }
+  const expandForNp = await evaluate(`(() => {
+    const b = document.querySelector('[data-nm="dock-expand"]') || document.querySelector('[data-nm="dock-cover"]')
+    if (!b) return false
+    b.click()
+    return true
+  })()`)
+  try {
     await waitFor(`!!document.querySelector('[data-nm="nowplaying"]')`, 'nowplaying', 8000)
     npReady = true
-    check('播放页 [data-nm="nowplaying"] 出现', true)
+    check('播放页 [data-nm="nowplaying"] 出现（dock-expand）', !!expandForNp)
   } catch (err) {
-    check('播放页 [data-nm="nowplaying"] 出现', false, '点曲目行后 8s 内未出现（v2 播放页可能未实现/未落盘）')
+    check('播放页 [data-nm="nowplaying"] 出现（dock-expand）', false, '点 dock-expand 后 8s 内未出现')
   }
 
   if (npReady) {
@@ -2352,9 +2591,10 @@ try {
     const el = document.querySelector('[data-nm="build-stamp"]')
     return el ? (el.textContent || '').trim() : null
   })()`)
-  check('面板构建时间戳 [data-nm="build-stamp"] 存在且含新版本 v1.0.2 + 日期',
-    !!buildStamp && /v1\.0\.2/.test(buildStamp) && /\d{4}-\d{2}-\d{2}/.test(buildStamp),
+  check('build-stamp 文本匹配「更新于 v1.1.0 ·」且不含「登录态」',
+    !!buildStamp && /v1\.1\.0/.test(buildStamp) && /更新于/.test(buildStamp) && !/登录态/.test(buildStamp),
     JSON.stringify({ buildStamp }))
+  try { await evaluate(`(() => { const el = document.querySelector('[data-nm="build-stamp"]'); if (el) el.scrollIntoView({ block: 'center' }) })()`); await sleep(250); await S('31-build-stamp.png'); await scrollTop() } catch { /* ignore */ }
   // 回到列表 + 确保 dock 存在
   await sleep(200)
   if (!(await playerVisible())) {
@@ -2624,6 +2864,7 @@ try {
   const audioReqHealBefore = (await calls()).filter((c) => c.path === '/netease-panel/api/audio').length
   const patchBadSeekable = () => evaluate(`(() => {
     try {
+      window.__nmSeekableDesc = window.__nmSeekableDesc || Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'seekable')
       Object.defineProperty(HTMLMediaElement.prototype, 'seekable', {
         configurable: true,
         get() { return { length: 1, start() { return 0 }, end() { return 0 } } },
@@ -2633,7 +2874,12 @@ try {
       return String(err && err.message ? err.message : err)
     }
   })()`)
-  const restoreSeekable = () => evaluate(`(() => { try { delete HTMLMediaElement.prototype.seekable } catch (err) { /* ignore */ } })()`)
+  const restoreSeekable = () => evaluate(`(() => {
+    try {
+      if (window.__nmSeekableDesc) Object.defineProperty(HTMLMediaElement.prototype, 'seekable', window.__nmSeekableDesc)
+      else delete HTMLMediaElement.prototype.seekable
+    } catch (err) { /* ignore */ }
+  })()`)
   const audioCallsBefore = (await calls()).filter((c) => c.path === '/netease-panel/api/audio')
   const lastAudioSearchBefore = audioCallsBefore.length ? audioCallsBefore[audioCallsBefore.length - 1].search || '' : ''
   const cacheHeaders = await evaluate(`fetch('/netease-panel/api/audio?id=1901371647&level=lossless&_=cbtest', { headers: { Range: 'bytes=0-63' } }).then(function (r) {
@@ -2983,10 +3229,23 @@ try {
   if (rowClick) {
     await realClickAt(rowClick.x, rowClick.y)
     try {
-      await waitFor(`!!document.querySelector('[data-nm="nowplaying"]')`, 'nowplaying for likes', 8000)
-      check('点曲目行进入播放页（收藏测试）', true)
+      await waitFor(`(() => { const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio'); return !!a && !a.paused })()`, 'likes row plays', 8000)
+      check('收藏测试：点曲目行开始播放（不自动进入播放页）',
+        !(await evaluate(`!!document.querySelector('[data-nm="nowplaying"]')`)))
     } catch (err) {
-      check('点曲目行进入播放页（收藏测试）', false, String(err))
+      check('收藏测试：点曲目行开始播放（不自动进入播放页）', false, String(err))
+    }
+    const expandLikes = await evaluate(`(() => {
+      const b = document.querySelector('[data-nm="dock-expand"]') || document.querySelector('[data-nm="dock-cover"]')
+      if (!b) return false
+      b.click()
+      return true
+    })()`)
+    try {
+      await waitFor(`!!document.querySelector('[data-nm="nowplaying"]')`, 'nowplaying for likes', 8000)
+      check('收藏测试：dock-expand 进入播放页', !!expandLikes)
+    } catch (err) {
+      check('收藏测试：dock-expand 进入播放页', false, String(err))
     }
     await sleep(600)
     const fetchLikeStatus = (id) => evaluate(`fetch('/netease-panel/api/like/status?ids=' + encodeURIComponent(${JSON.stringify('__LIKE_ID__')})).then(function (r) { return r.json() }).then(function (j) { return j }).catch(function () { return null })`.replace('__LIKE_ID__', String(id)))
@@ -3265,6 +3524,365 @@ try {
   } catch (err) {
     check('重载后重新从基线开始轮询（首请求不带 cursor）', false, String(err))
   }
+  console.log('\n[9g] v1.1 原生全屏播放：row-fullscreen / np-fullscreen / Esc')
+  // 回到列表
+  if (await evaluate(`!!document.querySelector('[data-nm="nowplaying"]')`)) {
+    await evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`)
+    await sleep(500)
+  }
+  await evaluate(`window.__setActivePanel('netease-music')`)
+  await scrollTop()
+  if (!(await evaluate(`document.querySelectorAll('[data-nm="track"]').length >= 5`))) {
+    await reload()
+    await waitFor(`document.querySelectorAll('[data-nm="track"]').length >= 5`, 'rows for fullscreen', 15000)
+    await evaluate(`window.__setActivePanel('netease-music')`)
+    await scrollTop()
+  }
+  const rowFsInfo = await evaluate(`(() => {
+    const row = document.querySelector('[data-nm="track"]')
+    if (!row) return null
+    const r = row.getBoundingClientRect()
+    return { id: row.getAttribute('data-id'), x: Math.round(r.left + r.width * 0.5), y: Math.round(r.top + r.height / 2) }
+  })()`)
+  check('曲目行存在（全屏测试）', !!rowFsInfo, JSON.stringify(rowFsInfo))
+  let rowFsBtn = null
+  if (rowFsInfo) {
+    await dispatchMouse('mouseMoved', rowFsInfo.x, rowFsInfo.y)
+    await sleep(350)
+    rowFsBtn = await evaluate(`(() => {
+      const btn = document.querySelector('[data-nm="track"] [data-nm="row-fullscreen"]')
+      if (!btn) return null
+      const r = btn.getBoundingClientRect()
+      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), w: Math.round(r.width) }
+    })()`)
+  }
+  check('hover 曲目行出现 [data-nm="row-fullscreen"]', !!rowFsBtn, JSON.stringify(rowFsBtn))
+  let realFs = false
+  let fsMode = 'none'
+  if (rowFsBtn && rowFsInfo) {
+    // 优先用真实鼠标手势触发原生 Fullscreen API
+    await realClickAt(rowFsBtn.x, rowFsBtn.y)
+    try {
+      await waitFor(`!!document.fullscreenElement`, 'real fullscreen', 2500)
+      realFs = true
+      fsMode = 'real'
+    } catch { realFs = false }
+    if (!realFs) {
+      // headless 无手势/API 受限：monkeypatch 验证调用链
+      await evaluate(`(() => {
+        document.__fsCalls = 0
+        document.__exitCalls = 0
+        document.__fsEl = null
+        try { Object.defineProperty(document, 'fullscreenElement', { configurable: true, get() { return document.__fsEl } }) } catch (err) { /* ignore */ }
+        HTMLElement.prototype.requestFullscreen = function () {
+          document.__fsEl = this
+          document.__fsCalls += 1
+          document.dispatchEvent(new Event('fullscreenchange'))
+          return Promise.resolve()
+        }
+        document.exitFullscreen = function () {
+          document.__exitCalls += 1
+          document.__fsEl = null
+          document.dispatchEvent(new Event('fullscreenchange'))
+          return Promise.resolve()
+        }
+        return true
+      })()`)
+      await evaluate(`(() => {
+        const row = document.querySelector('[data-nm="track"]')
+        const btn = row && row.querySelector('[data-nm="row-fullscreen"]')
+        if (btn) btn.click()
+      })()`)
+      fsMode = 'mock'
+    }
+    try {
+      await waitFor(`!!document.querySelector('[data-nm="nowplaying"]')`, 'np after row fullscreen', 6000)
+      check('点 row-fullscreen 后打开播放页', true)
+    } catch (err) {
+      check('点 row-fullscreen 后打开播放页', false, String(err))
+    }
+    try {
+      await waitFor(`(() => {
+        const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio')
+        if (!a || a.paused) return false
+        const m = /[?&]id=(\\d+)/.exec(a.getAttribute('src') || '')
+        return !!m && m[1] === ${JSON.stringify('__ROWID__')}
+      })()`.replace('__ROWID__', String(rowFsInfo.id)), 'row fullscreen plays', 8000)
+      check('点 row-fullscreen 播放该曲', true)
+    } catch (err) {
+      const curId = await audioTrackId()
+      check('点 row-fullscreen 播放该曲', false, JSON.stringify({ rowId: rowFsInfo.id, curId }))
+    }
+    await sleep(600)
+    if (realFs) {
+      const fsGeom = await evaluate(`(() => {
+        const el = document.fullscreenElement
+        const np = document.querySelector('[data-nm="nowplaying"]')
+        const dock = document.querySelector('[data-nm="dock"]')
+        const dr = dock ? dock.getBoundingClientRect() : null
+        const progress = [...document.querySelectorAll('[data-nm="player-progress"]')].filter((x) => { const r = x.getBoundingClientRect(); return r.width > 0 && r.height > 0 })
+        const r = el ? el.getBoundingClientRect() : null
+        return {
+          fullscreenNp: !!el && !!np && (el === np || el.contains(np) || np.contains(el)),
+          w: r ? Math.round(r.width) : null,
+          h: r ? Math.round(r.height) : null,
+          iw: window.innerWidth,
+          ih: window.innerHeight,
+          dockVisible: !!dr && dr.width > 0 && dr.height > 0,
+          progressCount: progress.length,
+        }
+      })()`)
+      check('真实全屏：fullscreenElement 是播放页根',
+        !!fsGeom && fsGeom.fullscreenNp, JSON.stringify(fsGeom))
+      check('真实全屏：root 宽高 = innerWidth/innerHeight',
+        !!fsGeom && Math.abs(fsGeom.w - fsGeom.iw) <= 2 && Math.abs(fsGeom.h - fsGeom.ih) <= 2, JSON.stringify(fsGeom))
+      check('真实全屏：dock 仍可见且全页 progress 仍 1 条',
+        !!fsGeom && fsGeom.dockVisible && fsGeom.progressCount === 1, JSON.stringify(fsGeom))
+      await S('33-fullscreen-playback.png')
+    } else {
+      const callInfo = await evaluate(`({ calls: document.__fsCalls, fsEl: !!document.__fsEl })`)
+      check('headless 无原生全屏手势：monkeypatch 验证 requestFullscreen 被调用', !!callInfo && callInfo.calls >= 1 && callInfo.fsEl,
+        '环境 Fullscreen API 受限，真实 CSS :fullscreen 几何 skip；' + JSON.stringify(callInfo))
+      await S('32-np-fullscreen.png')
+    }
+    const fsBtnInfo = await evaluate(`(() => {
+      const b = document.querySelector('[data-nm="np-fullscreen"]')
+      if (!b) return null
+      const r = b.getBoundingClientRect()
+      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), title: b.getAttribute('title'), aria: b.getAttribute('aria-label') }
+    })()`)
+    check('播放页有 [data-nm="np-fullscreen"] 按钮', !!fsBtnInfo, JSON.stringify(fsBtnInfo))
+    // 全屏中 Esc：只退出全屏（合成 Esc 在 mock 下不会退出，只验证 NP 仍在）
+    await evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`)
+    await sleep(400)
+    check('全屏时按 Esc 不关闭播放页', await evaluate(`!!document.querySelector('[data-nm="nowplaying"]')`))
+    // 用 np-fullscreen 退出全屏
+    if (fsBtnInfo) await realClickAt(fsBtnInfo.x, fsBtnInfo.y)
+    let exited = false
+    try {
+      await waitFor(`!document.fullscreenElement`, 'exit fullscreen', 4000)
+      exited = true
+    } catch { exited = false }
+    check('点 np-fullscreen 退出全屏', exited, JSON.stringify(await evaluate(`({fs: !!document.fullscreenElement, exitCalls: document.__exitCalls})`)))
+    check('退出全屏后播放页仍在', await evaluate(`!!document.querySelector('[data-nm="nowplaying"]')`))
+    const fsOldTitle = String((fsBtnInfo && fsBtnInfo.title) || '')
+    try {
+      await waitFor(`(() => {
+        const b = document.querySelector('[data-nm="np-fullscreen"]')
+        if (!b) return false
+        return b.getAttribute('title') !== ${JSON.stringify('__OLD_TITLE__')}
+      })()`.replace('__OLD_TITLE__', fsOldTitle), 'np-fullscreen label toggled', 3000)
+    } catch { /* 断言输出 */ }
+    const afterFsExit = await evaluate(`(() => {
+      const b = document.querySelector('[data-nm="np-fullscreen"]')
+      return b ? { title: b.getAttribute('title'), aria: b.getAttribute('aria-label') } : null
+    })()`)
+    check('np-fullscreen 按钮文案随全屏状态切换',
+      !!fsBtnInfo && !!afterFsExit && (fsBtnInfo.title !== afterFsExit.title || fsBtnInfo.aria !== afterFsExit.aria),
+      JSON.stringify({ before: fsBtnInfo, after: afterFsExit }))
+    // 再次进入全屏，点播放页「返回」：必须退出全屏 + 关闭 NP + 播放不中断（真机反馈：被困全屏）
+    const reenterBtn = await evaluate(`(() => {
+      const b = document.querySelector('[data-nm="np-fullscreen"]')
+      if (!b) return null
+      const r = b.getBoundingClientRect()
+      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }
+    })()`)
+    if (reenterBtn) await realClickAt(reenterBtn.x, reenterBtn.y)
+    let reenteredFs = false
+    try {
+      await waitFor(`!!document.fullscreenElement`, 're-enter fullscreen', 4000)
+      reenteredFs = true
+      check('np-fullscreen 可再次进入全屏', true)
+    } catch (err) {
+      check('np-fullscreen 可再次进入全屏', false, JSON.stringify(await evaluate('({fs: !!document.fullscreenElement, calls: document.__fsCalls})')))
+    }
+    const backInfo = await evaluate(`(() => {
+      const b = document.querySelector('[data-nm="np-back"]')
+      if (!b) return null
+      const r = b.getBoundingClientRect()
+      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), title: b.getAttribute('title'), aria: b.getAttribute('aria-label') }
+    })()`)
+    check('播放页有 [data-nm="np-back"] 返回按钮', !!backInfo, JSON.stringify(backInfo))
+    if (backInfo) await realClickAt(backInfo.x, backInfo.y)
+    let backExitedFs = false
+    let backClosedNp = false
+    try {
+      await waitFor(`!document.fullscreenElement`, 'exit fullscreen via back', 5000)
+      backExitedFs = true
+    } catch { backExitedFs = false }
+    try {
+      await waitFor(`!document.querySelector('[data-nm="nowplaying"]')`, 'np closed via back', 5000)
+      backClosedNp = true
+    } catch { backClosedNp = false }
+    check('全屏中点「返回」会调用 exitFullscreen（fullscreenElement 清空）', backExitedFs,
+      JSON.stringify(await evaluate('({fs: !!document.fullscreenElement, exitCalls: document.__exitCalls, np: !!document.querySelector(\'[data-nm="nowplaying"]\')})')))
+    check('全屏中点「返回」关闭播放页并回到列表', backClosedNp)
+    const backPlaying1 = await evaluate(`(() => { const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio'); return a ? { paused: a.paused, t: a.currentTime } : null })()`)
+    await sleep(700)
+    const backPlaying2 = await evaluate(`(() => { const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio'); return a ? { paused: a.paused, t: a.currentTime } : null })()`)
+    check('全屏返回列表后播放不中断（audio 仍在播且时间前进）',
+      !!backPlaying1 && backPlaying1.paused === false && !!backPlaying2 && backPlaying2.t > backPlaying1.t,
+      JSON.stringify({ backPlaying1, backPlaying2 }))
+    // 非全屏 Esc 关闭 NP：用 dock-expand 重新打开
+    await evaluate(`(() => { const b = document.querySelector('[data-nm="dock-expand"]') || document.querySelector('[data-nm="dock-cover"]'); if (b) b.click() })()`)
+    try { await waitFor(`!!document.querySelector('[data-nm="nowplaying"]')`, 'np reopened for esc test', 5000) } catch { /* ignore */ }
+    await evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`)
+    let npClosed = false
+    try {
+      await waitFor(`!document.querySelector('[data-nm="nowplaying"]')`, 'np closed after Esc', 5000)
+      npClosed = true
+    } catch { npClosed = false }
+    check('非全屏时 Esc 关闭播放页', npClosed)
+    const stillPlaying1 = await evaluate(`(() => { const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio'); return a ? { paused: a.paused, t: a.currentTime } : null })()`)
+    await sleep(700)
+    const stillPlaying2 = await evaluate(`(() => { const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio'); return a ? { paused: a.paused, t: a.currentTime } : null })()`)
+    check('关闭播放页后播放不中断（audio 仍在播且时间前进）',
+      !!stillPlaying1 && stillPlaying1.paused === false && !!stillPlaying2 && stillPlaying2.t > stillPlaying1.t,
+      JSON.stringify({ stillPlaying1, stillPlaying2 }))
+  }
+  const fsCss = await evaluate(`(() => {
+    const styles = [...document.querySelectorAll('style')].map((el) => el.textContent || '').join('\\n')
+    return { hasRule: /:fullscreen/.test(styles), hasNpFullscreen: /\\.nm-np[^}]*:fullscreen/.test(styles) }
+  })()`)
+  check('样式表包含 .nm-np:fullscreen 规则', !!fsCss && fsCss.hasNpFullscreen, JSON.stringify(fsCss))
+
+  console.log('\n[9h] v1.1 播放模式：dock/NP play-mode + 列表/顺序/单曲/随机')
+  const modeTracks = [
+    { id: 1901371647, name: '水星记', artist: '郭顶', artists: [{ name: '郭顶' }], album: '飞行器的执行周期', duration: 8, cover: null },
+    { id: 1901371684, name: '晴天', artist: '周杰伦', artists: [{ name: '周杰伦' }], album: '叶惠美', duration: 8, cover: null },
+  ]
+  await evaluate(`window.__setActivePanel('netease-music')`)
+  await config({ playerCommand: { type: 'playQueue', tracks: modeTracks, title: '模式测试' } })
+  try {
+    await waitFor(`(() => { const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio'); if (!a || a.paused) return false; const m = /[?&]id=(\\d+)/.exec(a.getAttribute('src') || ''); return !!m && m[1] === '1901371647' })()`, 'mode tracks playing', 8000)
+    check('注入队列用于播放模式测试', true)
+  } catch (err) { check('注入队列用于播放模式测试', false, String(err)) }
+  const dockModeCount = await evaluate(`document.querySelectorAll('[data-nm="dock"] [data-nm="play-mode"]').length`)
+  check('dock 有 1 个 [data-nm="play-mode"]', dockModeCount === 1, JSON.stringify({ dockModeCount }))
+  await evaluate(`(() => { const b = document.querySelector('[data-nm="dock-cover"]'); if (b) b.click() })()`)
+  try { await waitFor(`!!document.querySelector('[data-nm="nowplaying"]')`, 'np for play modes', 6000) } catch { /* ignore */ }
+  const npModeCount = await evaluate(`document.querySelectorAll('[data-nm="nowplaying"] [data-nm="play-mode"]').length`)
+  check('播放页有 1 个 [data-nm="play-mode"]', npModeCount === 1, JSON.stringify({ npModeCount }))
+  const modeState = () => evaluate(`(() => {
+    const b = document.querySelector('[data-nm="dock"] [data-nm="play-mode"]') || document.querySelector('[data-nm="play-mode"]')
+    return b ? { title: b.getAttribute('title'), aria: b.getAttribute('aria-label'), text: (b.textContent || '').trim(), stored: localStorage.getItem('netease-music:play-mode') } : null
+  })()`)
+  const EXPECT_MODES = [['order', '顺序播放'], ['single', '单曲循环'], ['shuffle', '随机播放'], ['list', '列表循环']]
+  const clickMode = async () => {
+    const b = await evaluate(`(() => { const el = document.querySelector('[data-nm="dock"] [data-nm="play-mode"]') || document.querySelector('[data-nm="play-mode"]'); if (el) el.click() })()`)
+    await sleep(450)
+    return modeState()
+  }
+  // 先对齐到 list（最多点 4 次）
+  for (let i = 0; i < 4; i++) {
+    const st = await modeState()
+    if (st && /列表循环/.test(st.title || '')) break
+    await clickMode()
+  }
+  let modeSeqOk = true
+  const modeSeen = []
+  for (let i = 0; i < EXPECT_MODES.length; i++) {
+    const st = await clickMode()
+    modeSeen.push(st && st.title)
+    const [key, cn] = EXPECT_MODES[i]
+    if (!st || !(st.title || '').includes(cn) || st.stored !== key) modeSeqOk = false
+  }
+  check('播放模式按 列表→顺序→单曲→随机→列表 循环，title/localStorage 正确', modeSeqOk, JSON.stringify({ modeSeen }))
+  check('切换播放模式出现 toast', await evaluate(`(() => { const t = document.querySelector('.nm-toast, [data-nm="toast"], [role="status"]'); return !!t && /播放模式/.test(t.textContent || '') })()`))
+  // ended 行为：单曲循环（真实播到尾）/ 列表循环 / 顺序 / 随机（合成 ended，避免 seek 时序抖动）
+  const modeKey = () => evaluate(`localStorage.getItem('netease-music:play-mode')`)
+  const ensureMode = async (want) => {
+    for (let i = 0; i < 5; i++) {
+      const cur = await modeKey()
+      if (cur === want) return true
+      await clickMode()
+    }
+    return (await modeKey()) === want
+  }
+  const playingInfo = () => evaluate(`(() => {
+    const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio')
+    const m = a && /[?&]id=(\\d+)/.exec(a.getAttribute('src') || '')
+    return { id: m ? m[1] : null, paused: a ? a.paused : null, t: a ? a.currentTime : null }
+  })()`)
+  const fireEnded = () => evaluate(`(() => {
+    const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio')
+    if (!a) return false
+    try { a.dispatchEvent(new Event('ended')) } catch (err) { /* ignore */ }
+    return true
+  })()`)
+  const queueForMode = async () => {
+    await config({ playerCommand: { type: 'playQueue', tracks: modeTracks, title: '模式测试' } })
+    await sleep(800)
+  }
+  const seekNearEnd = async (offset = 0.25) => {
+    await evaluate(`(() => {
+      const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio')
+      if (!a) return
+      try { a.currentTime = Math.max(0, a.duration - ${offset}) } catch (err) { /* ignore */ }
+      const p = a.play(); if (p && p.catch) p.catch(() => {})
+    })()`)
+    await sleep(1800)
+  }
+  // 单曲循环：真实播到结尾（前面已验证），保留一次真实 ended
+  await ensureMode('single')
+  await queueForMode()
+  await seekNearEnd()
+  const singleRes = await playingInfo()
+  check('单曲循环：ended 后同一首重播（仍播放）', !!singleRes && String(singleRes.id) === '1901371647' && singleRes.paused === false, JSON.stringify(singleRes))
+  // 列表循环：最后一首 ended → 回第一首并继续
+  check('切到列表循环模式', await ensureMode('list'))
+  await queueForMode()
+  await config({ playerCommand: { type: 'control', action: 'next' } })
+  try {
+    await waitFor(`(() => { const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio'); const m = a && /[?&]id=(\\d+)/.exec(a.getAttribute('src') || ''); return !!m && m[1] === '1901371684' })()`, 'next applied for ended test', 6000)
+  } catch { /* 断言输出 */ }
+  await fireEnded()
+  await sleep(1000)
+  const listRes = await playingInfo()
+  check('列表循环：最后一首 ended 回第一首并继续播放',
+    !!listRes && String(listRes.id) === '1901371647' && listRes.paused === false, JSON.stringify(listRes))
+  // 顺序播放：最后一首 ended → 停止
+  check('切到顺序播放模式', await ensureMode('order'))
+  await queueForMode()
+  await config({ playerCommand: { type: 'control', action: 'next' } })
+  try {
+    await waitFor(`(() => { const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio'); const m = a && /[?&]id=(\\d+)/.exec(a.getAttribute('src') || ''); return !!m && m[1] === '1901371684' })()`, 'next applied for ended test', 6000)
+  } catch { /* 断言输出 */ }
+  await fireEnded()
+  await sleep(1000)
+  const orderRes = await playingInfo()
+  check('顺序播放：最后一首 ended 后停止',
+    !!orderRes && String(orderRes.id) === '1901371684' && orderRes.paused === true, JSON.stringify(orderRes))
+  // 随机播放：ended → 切到其它歌曲（重试一次）
+  check('切到随机播放模式', await ensureMode('shuffle'))
+  let shuffleOk = false
+  let shuffleRes = null
+  for (let attempt = 0; attempt < 3 && !shuffleOk; attempt++) {
+    await queueForMode()
+    await fireEnded()
+    await sleep(1000)
+    shuffleRes = await playingInfo()
+    if (shuffleRes && shuffleRes.paused === false && String(shuffleRes.id) !== '1901371647') shuffleOk = true
+  }
+  check('随机播放：ended 后切到其它歌曲', shuffleOk, JSON.stringify(shuffleRes))
+
+  // 恢复列表模式并回列表
+  for (let i = 0; i < 4; i++) { const st = await modeState(); if (st && /列表循环/.test(st.title || '')) break; await clickMode() }
+  if (await evaluate(`!!document.querySelector('[data-nm="nowplaying"]')`)) {
+    await evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`)
+    await sleep(400)
+  }
+  await evaluate(`window.__setActivePanel('netease-music')`)
+
+  // v1.1 清理：诊断日志只保留 seek/recover 类，不再出现 probe:audio*/media:*/audio:*/status:*
+  const finalLogs = await evaluate(`fetch('/__logs').then(function (r) { return r.json() }).catch(function () { return null })`)
+  const finalEvents = (((finalLogs && finalLogs.clientLogs) || []).map((x) => (x.body && x.body.event) || ''))
+  const bannedPrefixes = ['probe:audio', 'media:', 'audio:created', 'audio:bind', 'status:auth', 'status:error']
+  const bannedHits = finalEvents.filter((e) => bannedPrefixes.some((p) => e === p || e.indexOf(p) === 0))
+  check('clientlog 不再出现 probe:audio*/media:*/audio:*/status:* 诊断事件', bannedHits.length === 0,
+    JSON.stringify({ bannedHits: bannedHits.slice(0, 10), total: finalEvents.length }))
+  check('clientlog 仍保留 seek:recover* 优先事件', finalEvents.some((e) => /^seek:recover/.test(e)),
+    JSON.stringify(finalEvents.filter((e) => /recover/.test(e)).slice(0, 8)))
   await evaluate(`window.__setActivePanel('netease-music')`)
   await sleep(300)
 
