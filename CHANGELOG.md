@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.0.2 — 2026-11-06
+
+进度条拖动（音源被浏览器判定不可 seek）根因修复 + 自愈。
+
+- **真机日志定位**：拖动时 `audio.seekable = [[0,0]]`（浏览器认为整首不可跳转），`currentTime` 被钳到 0，表现为「进度条动了声音还在旧位置 / 松手跳回 0:00」。
+- **自愈式重建**：检测到 `seekable` 异常或 seeked 落地偏差 >3s 时，**新建 `<audio>` 元素**重建媒体管线（`pendingResume` 回到目标位置），旧元素移除；每 5s 最多一次，失败 toast「当前音源暂时无法跳转」。
+- **缓存隔离**：音频 URL 每次加载追加 `&_=<timestamp>` 缓存击穿；Host 音频响应改为 `Cache-Control: no-store, no-transform` 且不再转发 ETag，避免复用被中断的局部媒体缓存。
+- **可观测性**：`seek:recover / seek:recover-new-element / seek:recover-done / seek:recover-skip` 与 `media:loadedmetadata(seekable)` 走优先日志桶（不受 20 条/分钟普通配额限制）；Host 增加 `[audio-req]/[audio-resp]` 头日志。
+- 验收：372/372 断言通过（新增新元素重建、缓存击穿、落点恢复、5s 节流、响应头 no-store、日志预算等断言）。
+
 ## v1.0.1 — 2026-11-06
 
 进度条拖动兜底与真机诊断加固。

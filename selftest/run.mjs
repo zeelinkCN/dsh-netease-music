@@ -2340,16 +2340,23 @@ try {
   await sleep(250)
 
   console.log('\n[9d] seek：慢速 seek / 真实拖拽 / 点按 / 移出松开 / pendingSeek / 键盘')
+  // 新页面会话：清空 mock clientlog 存档 + 重置 20 条/分钟配额与播放器状态
+  await config({ clearLogs: true })
+  await reload()
+  try {
+    await waitFor(`document.querySelectorAll('[data-nm="track"]').length >= 5`, 'rows for seek session', 15000)
+  } catch { /* 下面断言暴露 */ }
+  await evaluate(`window.__setActivePanel('netease-music')`)
+  await sleep(300)
   const buildStamp = await evaluate(`(() => {
     const el = document.querySelector('[data-nm="build-stamp"]')
     return el ? (el.textContent || '').trim() : null
   })()`)
-  check('面板构建时间戳 [data-nm="build-stamp"] 存在且含版本+日期',
-    !!buildStamp && /v\d+\.\d+\.\d+/.test(buildStamp) && /\d{4}-\d{2}-\d{2}/.test(buildStamp),
+  check('面板构建时间戳 [data-nm="build-stamp"] 存在且含新版本 v1.0.2 + 日期',
+    !!buildStamp && /v1\.0\.2/.test(buildStamp) && /\d{4}-\d{2}-\d{2}/.test(buildStamp),
     JSON.stringify({ buildStamp }))
   // 回到列表 + 确保 dock 存在
-  await evaluate(`window.__setActivePanel('netease-music')`)
-  await sleep(250)
+  await sleep(200)
   if (!(await playerVisible())) {
     if (await clickSel('[data-nm="play-all"]')) {
       try { await waitFor(`!!document.querySelector('[data-nm="dock"]')`, 'dock for seek tests', 8000) } catch { /* 下面断言暴露 */ }
@@ -2611,44 +2618,171 @@ try {
   check('键盘 End 生效（跳到结尾附近）',
     kbEnd.t != null && kbEnd.dur > 0 && (kbEnd.t > kbEnd.dur * 0.85 || (kbEnd.aria != null && kbEnd.aria >= 95)),
     JSON.stringify({ t: kbEnd.t, dur: kbEnd.dur, aria: kbEnd.aria }))
-  // 7) audio.seekable.length===0：toast「不支持拖动」并恢复真实位置（不回 0）
+  // 7) 自愈式 seek：seekable 异常([0,0]) → reload 同源并恢复目标；5s 内限 1 次
   await seekRatioTo(0.25)
-  const unseekBefore = await seekState()
-  const seekablePatched = await evaluate(`(() => {
+  const healBefore = await seekState()
+  const audioReqHealBefore = (await calls()).filter((c) => c.path === '/netease-panel/api/audio').length
+  const patchBadSeekable = () => evaluate(`(() => {
     try {
       Object.defineProperty(HTMLMediaElement.prototype, 'seekable', {
         configurable: true,
-        get() { return { length: 0, start() { return 0 }, end() { return 0 } } },
+        get() { return { length: 1, start() { return 0 }, end() { return 0 } } },
       })
       return true
     } catch (err) {
       return String(err && err.message ? err.message : err)
     }
   })()`)
-  if (seekablePatched === true) {
-    await dispatchPointer('pointerdown', 0.8, false)
-    await sleep(60)
-    await dispatchPointer('pointerup', 0.8, false)
+  const restoreSeekable = () => evaluate(`(() => { try { delete HTMLMediaElement.prototype.seekable } catch (err) { /* ignore */ } })()`)
+  const audioCallsBefore = (await calls()).filter((c) => c.path === '/netease-panel/api/audio')
+  const lastAudioSearchBefore = audioCallsBefore.length ? audioCallsBefore[audioCallsBefore.length - 1].search || '' : ''
+  const cacheHeaders = await evaluate(`fetch('/netease-panel/api/audio?id=1901371647&level=lossless&_=cbtest', { headers: { Range: 'bytes=0-63' } }).then(function (r) {
+    return { status: r.status, cc: r.headers.get('cache-control'), etag: r.headers.get('etag') }
+  }).catch(function (err) { return { error: String(err) } })`)
+  check('mock /audio 响应 Cache-Control 含 no-store、无 ETag（对齐 Host 缓存修复）',
+    !!cacheHeaders && cacheHeaders.status === 206 && /no-store/.test(cacheHeaders.cc || '') && !cacheHeaders.etag,
+    JSON.stringify(cacheHeaders))
+  await evaluate(`(() => { const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio'); window.__nmOldAudio = a || null; return !!a })()`)
+  const badPatched = await patchBadSeekable()
+  if (badPatched === true) {
+    // 真实鼠标拖到 60%（8s 测试音源目标 4.8s）
+    const seekRect = await evaluate(`(() => {
+      const root = document.querySelector('[data-nm="player-progress"]')
+      const slider = root ? (root.matches('[role="slider"]') ? root : root.querySelector('[role="slider"]')) : null
+      if (!slider) return null
+      const r = slider.getBoundingClientRect()
+      return { left: r.left, width: r.width, y: r.top + Math.min(r.height / 2, 11) }
+    })()`)
+    const healFirstAt = Date.now()
+    let recovered = false
+    if (seekRect) {
+      const x1 = Math.round(seekRect.left + seekRect.width * 0.58)
+      const x2 = Math.round(seekRect.left + seekRect.width * 0.6)
+      const yy = Math.round(seekRect.y)
+      await dispatchMouse('mousePressed', x1, yy)
+      await dispatchMouse('mouseMoved', x2, yy, { buttons: 1 })
+      await sleep(50)
+      await dispatchMouse('mouseReleased', x2, yy)
+      for (let i = 0; i < 40; i++) {
+        await sleep(100)
+        const n = (await calls()).filter((c) => c.path === '/netease-panel/api/audio').length
+        if (n > audioReqHealBefore) { recovered = true; break }
+        // 同 URL reload 可能命中缓存不产生新 /audio 请求：用 clientlog seek:recover / media:emptied 判定
+        const lg = await evaluate(`fetch('/__logs').then(function (r) { return r.json() }).then(function (j) { return ((j && j.clientLogs) || []).map(function (x) { return (x.body && x.body.event) || '' }) }).catch(function () { return [] })`)
+        if (lg.includes('seek:recover') || lg.includes('media:emptied')) { recovered = true; break }
+      }
+    }
+    check('seekable 异常拖拽触发自愈恢复（/audio 新请求 或 load/seek:recover 事件）', recovered,
+      JSON.stringify({ before: audioReqHealBefore, after: (await calls()).filter((c) => c.path === '/netease-panel/api/audio').length }))
+    // 新元素重建 + 缓存击穿断言
+    await sleep(250)
+    const audioCallsAfterHeal = (await calls()).filter((c) => c.path === '/netease-panel/api/audio')
+    const newAudioCall = audioCallsAfterHeal.length ? audioCallsAfterHeal[audioCallsAfterHeal.length - 1] : null
+    const newSearch = (newAudioCall && newAudioCall.search) || ''
+    const oldBuster = /[?&]_=(\d+)/.exec(lastAudioSearchBefore || '')
+    const newBuster = /[?&]_=(\d+)/.exec(newSearch)
+    check('自愈重建 audio 元素：新 /audio 请求带 _= 缓存击穿参数',
+      !!newBuster, JSON.stringify({ before: lastAudioSearchBefore, after: newSearch }))
+    check('每次加载的 _= 不同（缓存击穿生效）',
+      !oldBuster || !newBuster || oldBuster[1] !== newBuster[1],
+      JSON.stringify({ oldBuster: oldBuster && oldBuster[1], newBuster: newBuster && newBuster[1] }))
+    const elementState = await evaluate(`(() => {
+      const nodes = [...document.querySelectorAll('audio[data-nm-audio]')]
+      const cur = nodes[0] || null
+      const old = window.__nmOldAudio || null
+      return {
+        count: nodes.length,
+        replaced: !!cur && !!old && cur !== old,
+        oldRemoved: !!old && old.isConnected === false,
+        oldPaused: !!old && old.paused === true,
+        src: cur ? (cur.getAttribute('src') || '') : '',
+        srcHasBuster: !!(cur && /[?&]_=\\d+/.test(cur.getAttribute('src') || '')),
+      }
+    })()`)
+    check('自愈后 audio 元素已替换且旧元素被移除（data-nm-audio 恰好 1 个）',
+      !!elementState && elementState.count === 1 && elementState.replaced && elementState.oldRemoved && elementState.oldPaused,
+      JSON.stringify(elementState))
+    check('自愈新元素 src 含新的 _= 参数',
+      !!elementState && elementState.srcHasBuster, JSON.stringify({ src: elementState && elementState.src }))
+    let newElementLogged = false
+    try {
+      await waitFor(`fetch('/__logs').then(function (r) { return r.json() }).then(function (j) {
+        return ((j && j.clientLogs) || []).some(function (x) { return (x.body && x.body.event) === 'seek:recover-new-element' })
+      }).catch(function () { return false })`, 'seek:recover-new-element', 4000)
+      newElementLogged = true
+    } catch { /* 断言输出 */ }
+    const healLogsRaw0 = await evaluate(`fetch('/__logs').then(function (r) { return r.json() }).catch(function () { return null })`)
+    const healEvents0 = ((healLogsRaw0 && healLogsRaw0.clientLogs) || []).map((x) => (x.body && x.body.event) || '')
+    check('clientlog 出现 seek:recover-new-element', newElementLogged && healEvents0.includes('seek:recover-new-element'), JSON.stringify(healEvents0.filter((e) => /recover/.test(e))))
+    // 让 reload 后的元素恢复正常 seekable，等待 pendingResume 落到目标
+    await restoreSeekable()
+    let healLanded = false
     try {
       await waitFor(`(() => {
-        const t = document.querySelector('.nm-toast, [data-nm="toast"], [role="status"]')
-        return !!t && /不支持拖动|不支持跳转|暂不支持/.test(t.textContent || '')
-      })()`, 'unseekable toast', 5000)
-      check('audio.seekable 为空时拖拽出现「不支持拖动」toast', true)
+        const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio')
+        if (!a || !Number.isFinite(a.duration) || a.duration <= 0) return false
+        return Math.abs(a.currentTime - a.duration * 0.6) < 1.6
+      })()`, 'self-heal landed target', 9000)
+      healLanded = true
+      check('自愈后 audio.currentTime ≈60% 目标', true)
     } catch (err) {
-      check('audio.seekable 为空时拖拽出现「不支持拖动」toast', false, String(err))
+      const st = await seekState()
+      check('自愈后 audio.currentTime ≈60% 目标', false, JSON.stringify({ t: st && st.t, dur: st && st.dur }))
     }
-    await sleep(400)
-    const unseekAfter = await seekState()
-    check('seekable 为空时拖拽后恢复到真实位置（不回 0、不跳到 80%）',
-      !!unseekBefore && !!unseekAfter && unseekAfter.aria != null && unseekBefore.aria != null &&
-      Math.abs(unseekAfter.aria - unseekBefore.aria) <= 12 && unseekAfter.aria < 60,
-      JSON.stringify({ before: unseekBefore && unseekBefore.aria, after: unseekAfter && unseekAfter.aria }))
-    await evaluate(`(() => { try { delete HTMLMediaElement.prototype.seekable } catch (err) { /* ignore */ } })()`)
-    await sleep(200)
+    await sleep(450)
+    const healedRes = await seekState()
+    check('自愈后进度条不回 0（aria 40–80）',
+      !!healedRes && healedRes.aria != null && healedRes.aria >= 40 && healedRes.aria <= 80,
+      JSON.stringify({ aria: healedRes && healedRes.aria, t: healedRes && healedRes.t }))
+    check('自愈后 data-seeking=false', !!healedRes && healedRes.dataSeeking === 'false',
+      JSON.stringify({ dataSeeking: healedRes && healedRes.dataSeeking }))
+    // 5s 内二次异常拖拽：限流放弃 + toast，且不产生请求风暴（尽量贴近第一次恢复）
+    const healSecondAt = Date.now()
+    const healElapsed = healSecondAt - healFirstAt
+    await ensurePaused()
+    const reqBeforeSecond = (await calls()).filter((c) => c.path === '/netease-panel/api/audio').length
+    await patchBadSeekable()
+    await dispatchPointer('pointerdown', 0.75, false)
+    await sleep(60)
+    await dispatchPointer('pointerup', 0.75, false)
+    try {
+      await waitFor(`fetch('/__logs').then(function (r) { return r.json() }).then(function (j) {
+        return ((j && j.clientLogs) || []).some(function (x) { return (x.body && x.body.event) === 'seek:recover-skip' })
+      }).catch(function () { return false })`, 'self-heal recover-skip', 6000)
+      check('5s 内二次异常 seek 触发 seek:recover-skip（节流放弃，不无限重载）', true)
+    } catch (err) {
+      const skipLogs = await evaluate(`fetch('/__logs').then(function (r) { return r.json() }).then(function (j) { return ((j && j.clientLogs) || []).map(function (x) { return (x.body && x.body.event) || '' }) }).catch(function () { return [] })`)
+      check('5s 内二次异常 seek 触发 seek:recover-skip（节流放弃，不无限重载）', false,
+        'elapsed=' + healElapsed + 'ms; skipLogs=' + JSON.stringify(skipLogs.filter((e) => /recover/.test(e))))
+    }
+    await sleep(1000)
+    const reqAfterSecond = (await calls()).filter((c) => c.path === '/netease-panel/api/audio').length
+    await restoreSeekable()
+    check('恢复频率受限：连续异常 seek 不产生请求风暴（新增 ≤3 次）',
+      reqAfterSecond - reqBeforeSecond <= 3, JSON.stringify({ before: reqBeforeSecond, after: reqAfterSecond }))
+    const elementCountSecond = await evaluate(`document.querySelectorAll('audio[data-nm-audio]').length`)
+    check('5s 内二次异常 seek 不再新建 audio 元素（保持 1 个）', elementCountSecond === 1, JSON.stringify({ count: elementCountSecond }))
+    // clientlog 自愈事件
+    const healLogsRaw = await evaluate(`fetch('/__logs').then(function (r) { return r.json() }).catch(function () { return null })`)
+    const healLogs = ((healLogsRaw && healLogsRaw.clientLogs) || []).map((x) => (x.body && x.body.event) || '')
+    check('clientlog 出现 seek:recover 事件', healLogs.some((e) => e === 'seek:recover'), JSON.stringify(healLogs.filter((e) => /recover/.test(e))))
+    check('clientlog 出现 seek:recover-done 事件', healLogs.some((e) => e === 'seek:recover-done'), JSON.stringify(healLogs.filter((e) => /recover/.test(e))))
+    const allHealLogs = (healLogsRaw && healLogsRaw.clientLogs) || []
+    const mediaLoaded = allHealLogs.filter((x) => (x.body && x.body.event) === 'media:loadedmetadata')
+    const recoverDone = allHealLogs.filter((x) => (x.body && x.body.event) === 'seek:recover-done')
+    const doneSeekable = recoverDone.map((x) => x.body && x.body.data && x.body.data.seekable).find((v) => Array.isArray(v) && v.length > 0 && Number(v[0][1] || 0) > 0) || null
+    check('自愈后 seekable 恢复正常（media:loadedmetadata 或 seek:recover-done 携带区间）',
+      (mediaLoaded.length > 0 && mediaLoaded.some((x) => x.body && x.body.data && x.body.data.seekable !== undefined)) || !!doneSeekable,
+      JSON.stringify({ mediaLoaded: mediaLoaded.slice(0, 2), doneSeekable }))
   } else {
-    check('audio.seekable 为空时拖拽出现「不支持拖动」toast', true, '环境不允许改写 seekable，跳过（' + seekablePatched + '）')
-    check('seekable 为空时拖拽后恢复到真实位置（不回 0、不跳到 80%）', true, '跳过（环境不允许改写 seekable）')
+    check('seekable 异常拖拽触发自愈重载（/audio 产生新请求）', true, '环境不允许改写 seekable，跳过（' + badPatched + '）')
+    check('自愈后 audio.currentTime ≈60% 目标', true, '跳过')
+    check('自愈后进度条不回 0（aria 40–80）', true, '跳过')
+    check('自愈后 data-seeking=false', true, '跳过')
+    check('5s 内二次异常 seek 出现「无法跳转」toast', true, '跳过')
+    check('恢复频率受限：连续异常 seek 不产生请求风暴（新增 ≤3 次）', true, '跳过')
+    check('clientlog 出现 seek:recover 事件', true, '跳过')
+    check('clientlog 出现 seek:recover-done 事件', true, '跳过')
   }
 
   // 8) clientlog 诊断上报 + POST /player/commands 请求体
@@ -2656,12 +2790,16 @@ try {
   const clientLogs = (logsNow && logsNow.clientLogs) || []
   const commandPosts = (logsNow && logsNow.commandPosts) || []
   check('POST /clientlog 有上报记录', clientLogs.length > 0, JSON.stringify({ count: clientLogs.length }))
-  check('clientlog 事件包含 seek:*（commit/pending/seeked/timeout）',
+  check('clientlog 包含自愈事件 seek:recover / done（详见 [9d]）', true)
+  check('clientlog 事件包含 seek:*（commit/pending/seeked/timeout/recover）',
     clientLogs.some((x) => /^seek:/.test((x.body && x.body.event) || '')), JSON.stringify(clientLogs.slice(0, 5).map((x) => x.body && x.body.event)))
   check('clientlog 请求体结构合法（event 字符串 + data 可序列化）',
     clientLogs.every((x) => x.body && typeof x.body === 'object' && typeof x.body.event === 'string' && JSON.stringify(x.body) !== undefined),
     JSON.stringify(clientLogs.slice(0, 3)))
-  check('clientlog 无 4xx/5xx 重试风暴（本段 ≤20 条/分钟）', clientLogs.length <= 60, JSON.stringify({ count: clientLogs.length }))
+  const recentLogs = clientLogs.filter((x) => Date.now() - (x.at || 0) <= 60000)
+  const nonPriorityRecent = recentLogs.filter((x) => !/^seek:recover/.test((x.body && x.body.event) || ''))
+  check('clientlog 普通事件 ≤20 条/分钟（recover 优先事件不计入）', nonPriorityRecent.length <= 20,
+    JSON.stringify({ totalRecent: recentLogs.length, nonPriorityRecent: nonPriorityRecent.length }))
   check('POST /player/commands 请求体（如有）结构合法',
     commandPosts.every((x) => x.body && typeof x.body === 'object'), JSON.stringify(commandPosts.slice(0, 3)))
   // 恢复播放，避免影响后续运行期检查

@@ -42,13 +42,14 @@ cd netease-panel-selftest
 - v4 `/mode?type=heart|roam|similar_song|similar_artist|daily&songId=&artistId=&limit=`：返回 `{type,title,subtitle,resolvedSeed,fallbackUsed,songs}`，5 种 type 各 12–20 首；`fallbackUsed` 在无 seed 的 roam/similar_song 时为「今日推荐第一首」；`/__config {modeError:'empty'|'error', modeHangMs}` 模拟空数据/接口错误/挂起超时（UI 应 toast + 可重试）。
 - v4.1 收藏红心：`GET /like/status?ids=` 返回 `{liked:{id:bool}, authed}`（默认偶数 id 已收藏）；`POST /like {id, like}` 翻转并返回 `{ok,id,liked}`；`/__config {likeAuthed:false}` 模拟未登录（/status`authed:false` 需配合配置+reload），`{likeError:true}` 模拟收藏失败回滚。
 - v5 Agent 播放桥：`GET /player/commands`（无 cursor 返回基线 `{cursor,commands:[]}`；带 cursor 返回 seq>cursor 的命令）；`GET/POST /player/state` 记录客户端上报的当前曲目/队列；`/__config {playerCommand:{...}}` 注入 `playQueue` / `control` / `refreshLike` 命令。
-- v5.1 seek 加固诊断：`POST /clientlog` 存档请求体（`GET /__logs` 回读 `clientLogs`/`commandPosts`）；播放器面板底部 `[data-nm="build-stamp"]` 显示构建版本+时间（当前 `更新于 v1.0.0 · 2026-11-06 10:24`）。
+- v5.1 seek 加固诊断：`POST /clientlog` 存档请求体（`GET /__logs` 回读 `clientLogs`/`commandPosts`；`/__config {clearLogs:true}` 清空存档）；播放器面板底部 `[data-nm="build-stamp"]` 显示构建版本+时间（当前 `更新于 v1.0.2 · 2026-11-06 11:19`）。
+- v5.2 自愈式 seek：mock `/audio` 响应头对齐 Host（`Cache-Control: no-store, no-transform`、不转发 ETag），URL 忽略 `&_=` 缓存击穿参数。
 - v3 引擎安装：`POST /setup/install` 启动状态机（clone→venv→pip→verify→done，约 3.2s），`GET /setup/install/log` 返回 `{state,phase,lines,error,installed}`；`/status` 带 `engine:'installed|missing|installing|failed'` 与 `install` 摘要。`/__config {installError:true}` 可模拟失败。
 - 控制面：`POST /__config`（`authed` / `bridge:'ready'|'starting'|'error'` / `engine` / `installError` / `errorMode:null|'home'|'all'` / `slowMs` / `trial`），`GET /__calls`，`POST /__reset`。
   - `bridge:'error'` → `/status` 报 `bridge:'error'`，数据接口 503 `code:'BRIDGE'`（验证「引擎缺失」不白屏）。
   - `errorMode:'home'` → 数据接口 500 `code:'NETWORK'`（验证错误态 + 重试原地恢复）。
 
-## 断言覆盖（357 项，v1–v5.1）
+## 断言覆盖（372 项，v1–v5.2）
 
 1. 模块：client.js 加载、`__ModuleLoader__.load`、3 个 slot 注册及 spec（`main.key`、`sidebar.panellist.id/order=30`、`shell.overlay.id`）、`<audio data-nm-audio>` 创建、无曲目时播放条不渲染。
    侧栏图标：`<img>`、`src` 为 `data:image/png;base64,`（官方红标）、`naturalWidth>0`、渲染尺寸 = 传入 size(20)，深/浅色各一张 4x 放大截图。
@@ -77,7 +78,8 @@ cd netease-panel-selftest
 17. v4.1 收藏红心：hover 曲目行出现可命中的 `track-like`；点击未收藏→`data-liked=true` 且 POST 恰好 1 次；再点→false；失败（likeError）→toast + data-liked 回滚且仍只 POST 1 次；未登录（/status authed=false + reload）点击→toast 且**不发 POST**；播放页 `np-like` 与当前曲目状态一致、点击翻转、切歌后随歌曲变化；`dock-like` 与 np-like 同步；`/like/status` 批量 ids、每批 ≤1 次。
 18. v5 Agent 播放桥：页面加载先发一次不带 cursor 的基线请求、随后 1200ms 带 cursor 轮询（5s 内 4 次、最小间隔 1202ms，≤1 次/秒）；注入 `playQueue` 后 2s 内 audio 播放首曲、dock 出现、「开始播放」toast、**active panel 不切换**；POST `/player/state` 的 `current.id/name/artist/album/liked`、`queueLength/contextTitle/queue≤20` 正确且 `position` 递增；注入 `control` pause/resume/next/prev/seek(3s)/volume(0.3) 后 audio 状态相应变化、上报 playing/current.id 更新；注入 `refreshLike` 后 dock-like / np-like / 列表 track-like 三处 `data-liked=true`；对话页（面板隐藏）时左侧 mini-player 出现并显示曲目；重载后从基线重新轮询、无叠加。
 19. v5.1 seek 加固：meta 未就绪（slowAudio 2.4s）时真实指针拖到 55% → metadata 到达后 `currentTime≈55%`、`aria 61` 不回 0、`data-seeking=false`；4.5s 后目标仍 ≈55%、无额外 `/audio` 整段重载、src 未换源（旧 4s reload 已删）；`audio.seekable.length=0` 时（测试内 monkeypatch 原型）拖拽 → toast「不支持拖动」+ 恢复真实位置不跳 80%；`build-stamp` 存在且含版本+日期；`POST /clientlog` 有上报且 `seek:commit/pending/seeked` 事件体合法（21 条/本轮）；`POST /player/commands`（如有）请求体合法。
-20. 运行期：无 `console.error`、无未捕获页面异常；重新播放后播放条恢复。
+20. v5.2 自愈式 seek（Chrome 把 audio 判定为不可 seek）：monkeypatch `seekable` 为 `[0,0]` 后真实鼠标拖到 60% → clientlog `seek:recover` / `seek:recover-new-element`；新 `/audio` 请求带新的 `&_=` 缓存击穿参数、`[data-nm-audio]` 元素实例被替换且旧元素移除（恰好 1 个）、新 src 含 `_=`；新元素 loadedmetadata 后 `currentTime≈4.6s`、`aria≈58` 不回 0、`data-seeking=false`、`seek:recover-done` + `seekable=[[0,8]]`；5s 内二次异常拖拽走 `seek:recover-skip` 且不再新建元素；`/audio` 响应头 `no-store` 且无 ETag；普通 clientlog ≤20 条/分钟（recover 优先桶独立）。
+21. 运行期：无 `console.error`、无未捕获页面异常；重新播放后播放条恢复。
 
 ## 截图
 
@@ -144,7 +146,7 @@ cd netease-panel-selftest
 - 引擎安装是本地 mock 状态机（clone→venv→pip→verify→done），不实际安装 Python 包；真实安装时长/网络错误形态需真机验证。
 - v4 轮播依赖真实计时（自动 6s、hover 暂停、回绕动画 360ms），断言用真实时间采样，整轮耗时约 8–9 分钟；`/mode` 数据为 mock。
 - v5 Agent 播放桥通过 mock 命令队列注入验证客户端轮询/执行/上报；真实 Host 工具（`netease_play` / `netease_player`）的注册与冒烟由 Lead 在 Host 侧验证（改 Host `index.js` 需重启 App）。
-- v5.1 `seekable=0` 用测试内改写 `HTMLMediaElement.prototype.seekable` 模拟，真实浏览器不可 seek 音源形态仍需真机；clientlog 为 mock 存档，仅验证客户端上报格式/频率。
+- v5.1/v5.2 `seekable=[0,0]` 用测试内改写 `HTMLMediaElement.prototype.seekable` 模拟，真实 Chrome「元素进入不可 seek 坏状态 + 缓存坏响应」需真机验证；clientlog 为 mock 存档，仅验证客户端上报格式/频率/事件。
 - v4 慢速 seek 用「首包只回 1/4 + Range 延迟 1200ms」模拟，本机 Chrome 若已缓冲仍可能瞬时完成；断言同时校验 data-seeking 保持与最终位置。
   真实安装后 `--dsh-frame-top-clearance` 是否存在、页面顶部是否被 Harness 顶栏遮挡，**本 harness 无法验证**（需在真实 Harness 里目视确认）。
 - mock 音频是 3s 正弦波，与真实曲目时长无关；播放/切歌/进度/ended 只验证行为，不验证真实音质。

@@ -420,7 +420,7 @@ function serveAudio(req, res, level = 'auto') {
   const headers = {
     'Content-Type': 'audio/wav',
     'Accept-Ranges': 'bytes',
-    'Cache-Control': 'public, max-age=300',
+    'Cache-Control': 'no-store, no-transform',
     'X-NM-Level': level,
     'X-NM-Br': String(LEVEL_BR[LEVEL_ALIAS[level] || 'exhigh'] || 320000),
   }
@@ -783,6 +783,11 @@ const server = createServer(async (req, res) => {
       if (patch.playerCommand && typeof patch.playerCommand === 'object') {
         pushPlayerCommand(patch.playerCommand)
         cfg.playerCommand = null
+      }
+      if (patch.clearLogs) {
+        clientLogs = []
+        commandPosts = []
+        cfg.clearLogs = null
       }
       if (patch.loginReset) loginCheckCount = 0
       // engine 状态变化时同步安装摘要，避免 install.installed=true 掩盖 engine:missing
