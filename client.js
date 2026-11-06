@@ -565,20 +565,44 @@ window.__ModuleLoader__.load({
       return readEnvelope(res)
     }
 
-    const CLIENT_BUILD = 'v1.0.1 · 2026-11-06 11:12'
+    const CLIENT_BUILD = 'v1.0.2 · 2026-11-06 11:19'
+    const CLIENT_LOG_STORE_KEY = 'netease-music:clientlog-times'
     const clientLogTimes = []
     const clientLogPriorityTimes = []
+    try {
+      if (typeof sessionStorage !== 'undefined') {
+        const raw = sessionStorage.getItem(CLIENT_LOG_STORE_KEY)
+        const stored = raw ? JSON.parse(raw) : []
+        if (Array.isArray(stored)) {
+          stored.forEach((item) => {
+            const at = Number(item && item.at)
+            if (!Number.isFinite(at)) return
+            const priority = !!(item && item.priority)
+            ;(priority ? clientLogPriorityTimes : clientLogTimes).push({ at, priority })
+          })
+        }
+      }
+    } catch (err) {
+      /* 忽略存储损坏 */
+    }
 
     function clientLog(event, data) {
       try {
         const name = String(event || '')
-        const priority = /^seek:recover/.test(name)
+        const priority = /^seek:recover/.test(name) || name === 'media:loadedmetadata'
         const now = Date.now()
         const bucket = priority ? clientLogPriorityTimes : clientLogTimes
         while (bucket.length && now - bucket[0].at > 60000) bucket.shift()
         /* 普通日志独立 20 条/分钟；seek:recover* 使用独立预算，绝不被 media:* 挤掉，也不挤占普通名额 */
         if (bucket.length >= 20) return
         bucket.push({ at: now, priority })
+        try {
+          if (typeof sessionStorage !== 'undefined') {
+            sessionStorage.setItem(CLIENT_LOG_STORE_KEY, JSON.stringify(clientLogTimes.concat(clientLogPriorityTimes).slice(-60)))
+          }
+        } catch (err) {
+          /* ignore */
+        }
         apiPost('/clientlog', { event: String(event || ''), data: data && typeof data === 'object' ? data : {} }).catch(() => {
           /* 诊断上报失败静默 */
         })
