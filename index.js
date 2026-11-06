@@ -485,6 +485,15 @@ export function apply(ctx) {
 
     const controller = new AbortController()
     res.on('close', () => controller.abort())
+    log(
+      '[audio-req]',
+      'id=' + id,
+      'level=' + level,
+      'range=' + String(req.headers.range || '-').slice(0, 40),
+      'ifRange=' + String(req.headers['if-range'] || '-').slice(0, 20),
+      'ifNoneMatch=' + String(req.headers['if-none-match'] || '-').slice(0, 20),
+      'accept=' + String(req.headers.accept || '-').slice(0, 40),
+    )
     const headers = { 'User-Agent': UA, Referer: 'https://music.163.com/' }
     if (req.headers.range) headers.Range = String(req.headers.range)
     let upstream
@@ -502,7 +511,7 @@ export function apply(ctx) {
       return fail(res, `音源返回 HTTP ${upstream.status}`, 'NETWORK')
     }
     res.statusCode = upstream.status === 206 ? 206 : 200
-    const passthrough = ['content-type', 'content-length', 'content-range', 'accept-ranges', 'etag']
+    const passthrough = ['content-type', 'content-length', 'content-range', 'accept-ranges']
     for (const key of passthrough) {
       const value = upstream.headers.get(key)
       if (value) res.setHeader(key, value)
@@ -511,7 +520,17 @@ export function apply(ctx) {
     const ext = String(info.type || '').toLowerCase().replace('.', '')
     res.setHeader('Content-Type', AUDIO_MIME[ext] || 'audio/mpeg')
     if (!res.getHeader('accept-ranges')) res.setHeader('Accept-Ranges', 'bytes')
-    res.setHeader('Cache-Control', 'public, max-age=3600')
+    // 音频流绝不能进浏览器缓存：被中断的局部响应被复用会让 <audio> 判定 seekable=[0,0]
+    res.setHeader('Cache-Control', 'no-store, no-transform')
+    res.setHeader('Pragma', 'no-cache')
+    log(
+      '[audio-resp]',
+      'id=' + id,
+      'status=' + res.statusCode,
+      'len=' + String(res.getHeader('content-length') || '-'),
+      'range=' + String(res.getHeader('content-range') || '-').slice(0, 40),
+      'acceptRanges=' + String(res.getHeader('accept-ranges') || '-'),
+    )
     try {
       for await (const chunk of upstream.body) {
         if (res.writableEnded) break

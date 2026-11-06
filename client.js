@@ -198,6 +198,7 @@ window.__ModuleLoader__.load({
       'toast.agentPlay': '开始播放：{title}',
       'toast.seekUnsupported': '当前音源不支持拖动进度',
       'toast.seekSlow': '跳转较慢，当前音源可能暂不支持跳转',
+      'toast.seekFailed': '当前音源暂时无法跳转',
       'footer.updated': '更新于',
     }
     const EN = {
@@ -388,6 +389,7 @@ window.__ModuleLoader__.load({
       'toast.agentPlay': 'Now playing: {title}',
       'toast.seekUnsupported': 'This audio source does not support seeking',
       'toast.seekSlow': 'Seeking is slow; this source may not support it',
+      'toast.seekFailed': 'This audio source cannot seek right now',
       'footer.updated': 'Updated',
     }
 
@@ -563,15 +565,20 @@ window.__ModuleLoader__.load({
       return readEnvelope(res)
     }
 
-    const CLIENT_BUILD = 'v1.0.0 · 2026-11-06 10:24'
+    const CLIENT_BUILD = 'v1.0.1 · 2026-11-06 11:12'
     const clientLogTimes = []
+    const clientLogPriorityTimes = []
 
     function clientLog(event, data) {
       try {
+        const name = String(event || '')
+        const priority = /^seek:recover/.test(name)
         const now = Date.now()
-        while (clientLogTimes.length && now - clientLogTimes[0] > 60000) clientLogTimes.shift()
-        if (clientLogTimes.length >= 20) return
-        clientLogTimes.push(now)
+        const bucket = priority ? clientLogPriorityTimes : clientLogTimes
+        while (bucket.length && now - bucket[0].at > 60000) bucket.shift()
+        /* 普通日志独立 20 条/分钟；seek:recover* 使用独立预算，绝不被 media:* 挤掉，也不挤占普通名额 */
+        if (bucket.length >= 20) return
+        bucket.push({ at: now, priority })
         apiPost('/clientlog', { event: String(event || ''), data: data && typeof data === 'object' ? data : {} }).catch(() => {
           /* 诊断上报失败静默 */
         })
@@ -707,6 +714,9 @@ window.__ModuleLoader__.load({
       let pendingResume = null
       let pendingSeek = null
       let pendingSeekRatio = null
+      let lastSeekRecoveryAt = 0
+      let recoveryLogTarget = null
+      let lastSeekLogAt = 0
       let seekHoldCount = 0
       let seekFallbackTimer = null
       let seekRecoverTimer = null
@@ -775,7 +785,8 @@ window.__ModuleLoader__.load({
       }
 
       function buildAudioUrl(id, level) {
-        return API + '/audio?' + qs({ id, level: level || state.quality || 'auto' })
+        /* 每次加载都带缓存击穿参数：避免浏览器复用被中断的局部缓存响应导致 audio 永久不可 seek */
+        return API + '/audio?' + qs({ id, level: level || state.quality || 'auto', _: Date.now() })
       }
 
       function syncAudioLevel() {
@@ -861,6 +872,7 @@ window.__ModuleLoader__.load({
         if (!el) return
         unbindAudio()
         audio = el
+        clientLog('audio:bind', { audioId: el.dataset ? el.dataset.nmAudioId : null })
         el.preload = 'metadata'
         el.volume = state.volume
         syncAudioLevel()
@@ -917,16 +929,59 @@ window.__ModuleLoader__.load({
           pendingResume = null
           const limit = isFinite(audio.duration) && audio.duration > 0 ? Math.max(0, audio.duration - 0.2) : resume.seconds
           const target = Math.min(resume.seconds, limit)
-          try {
-            audio.currentTime = target
-          } catch (err) {
-            /* ignore */
+          const applyResume = (attempt) => {
+            if (!audio) return
+            if (recoveryLogTarget != null) {
+              /* 自愈重载后给 seekable 一点恢复时间再落点；真实坏状态最终仍会走 skip/toast */
+              let end = 0
+              try {
+                if (audio.seekable && audio.seekable.length) end = Number(audio.seekable.end(audio.seekable.length - 1)) || 0
+              } catch (err) {
+                end = 0
+              }
+              const usable = seekableCount() > 0 && end >= (Number(audio.duration) || 0) - 2
+              if (!usable && attempt < 10) {
+                setTimeout(() => applyResume(attempt + 1), 150)
+                return
+              }
+            }
+            try {
+              audio.currentTime = target
+            } catch (err) {
+              /* ignore */
+            }
+            lastTimeEmit = Date.now()
+            patch({ position: Math.round(target * 1000) })
+            if (recoveryLogTarget != null) {
+              clientLog('seek:recover-done', {
+                currentTime: Number(audio.currentTime) || 0,
+                seekable: rangeSnapshot('seekable'),
+              })
+              recoveryLogTarget = null
+            }
+            if (resume.playing) requestPlay()
+            else patch({ playing: false, loading: false })
           }
-          patch({ position: Math.round(target * 1000) })
-          if (resume.playing) requestPlay()
-          else patch({ playing: false, loading: false })
+          applyResume(0)
         })
         on('durationchange', syncDuration)
+        ;['loadstart', 'emptied', 'loadedmetadata', 'abort', 'error', 'stalled', 'suspend', 'waiting', 'canplay'].forEach((eventName) => {
+          on(eventName, () => {
+            if (eventName === 'error') return
+            /* 只在 seek 活跃期记录 media 事件，避免正常播放时刷爆诊断预算 */
+            if (!state.seeking && Date.now() - lastSeekLogAt > 2500) return
+            try {
+              clientLog('media:' + eventName, {
+                audioId: audio && audio.dataset ? audio.dataset.nmAudioId : null,
+                currentTime: audio ? Number(audio.currentTime) || 0 : 0,
+                readyState: audio ? audio.readyState : -1,
+                networkState: audio ? audio.networkState : -1,
+                paused: audio ? !!audio.paused : null,
+                seekable: eventName === 'loadedmetadata' ? rangeSnapshot('seekable') : undefined,
+              })
+            } catch (err) { /* ignore */ }
+          })
+        })
         on('timeupdate', () => {
           if (!audio) return
           const now = Date.now()
@@ -945,18 +1000,25 @@ window.__ModuleLoader__.load({
         on('seeked', () => {
           if (!audio) return
           const landedTarget = state.seekTarget
+          const actual = Number(audio.currentTime) || 0
           clearSeekTimers()
           pendingSeek = null
           pendingSeekRatio = null
           lastTimeEmit = Date.now()
           clientLog('seek:seeked', {
-            currentTime: Number(audio.currentTime) || 0,
+            currentTime: actual,
             target: Number.isFinite(Number(landedTarget)) ? Number(landedTarget) : null,
           })
+          /* seekable 异常时浏览器会把目标钳回 0：明显没落地则重建 audio 上下文自愈 */
+          if (Number.isFinite(Number(landedTarget)) && Number(landedTarget) > 3 && Math.abs(actual - Number(landedTarget)) > 3) {
+            beginSeekRecovery(Number(landedTarget), 'seeked-miss')
+            return
+          }
+          recoveryLogTarget = null
           patch({
             seeking: seekHoldCount > 0,
             seekTarget: null,
-            position: Math.round((audio.currentTime || 0) * 1000),
+            position: Math.round(actual * 1000),
             loading: false,
           })
         })
@@ -1050,6 +1112,8 @@ window.__ModuleLoader__.load({
         pendingResume = null
         pendingSeek = null
         pendingSeekRatio = null
+        recoveryLogTarget = null
+        lastSeekRecoveryAt = 0
         clearSeekTimers()
         patch({
           current: track,
@@ -1278,8 +1342,102 @@ window.__ModuleLoader__.load({
         }, 12000)
       }
 
+      function rangeSnapshot(prop) {
+        try {
+          const list = audio && audio[prop]
+          if (!list || typeof list.length !== 'number') return []
+          const out = []
+          const count = Math.min(list.length, 4)
+          for (let i = 0; i < count; i += 1) out.push([Number(list.start(i)) || 0, Number(list.end(i)) || 0])
+          return out
+        } catch (err) {
+          return []
+        }
+      }
+
+      /* 自愈：Chrome 把 audio 元素标记为不可 seek 时，重建 src/上下文，loadedmetadata 的 pendingResume 会落回目标。
+         每 5 秒最多恢复一次；恢复后仍失败则提示并回到真实位置。 */
+      function beginSeekRecovery(targetSeconds, reason) {
+        lastSeekLogAt = Date.now()
+        const track = state.current
+        const target = Math.max(0, Number(targetSeconds) || 0)
+        const snapshot = {
+          target,
+          seekable: rangeSnapshot('seekable'),
+          buffered: rangeSnapshot('buffered'),
+          reason: String(reason || ''),
+        }
+        if (!audio || !track) return false
+        /* 恢复已发起但新元素 metadata 还没到：忽略旧元素的 seeked miss，避免取消 recoveryLogTarget */
+        if (recoveryLogTarget != null && Date.now() - lastSeekRecoveryAt < 2500) {
+          clientLog('seek:recover-skip', Object.assign({}, snapshot, { reason: 'inflight' }))
+          return false
+        }
+        if (Date.now() - lastSeekRecoveryAt < 5000) {
+          clientLog('seek:recover-skip', snapshot)
+          pendingSeek = null
+          pendingSeekRatio = null
+          notifyToast('seekFailed')
+          patch({
+            seeking: false,
+            seekTarget: null,
+            position: Math.round((audio.currentTime || 0) * 1000),
+          })
+          return false
+        }
+        lastSeekRecoveryAt = Date.now()
+        recoveryLogTarget = target
+        clientLog('seek:recover', snapshot)
+        pendingSeek = null
+        pendingSeekRatio = null
+        clearSeekTimers()
+        pendingResume = { seconds: target, playing: !!state.playing }
+        patch({
+          seeking: true,
+          seekTarget: target,
+          position: Math.round(target * 1000),
+          loading: true,
+        })
+        const oldAudio = audio
+        let nextAudio = null
+        try {
+          /* 不复用旧 audio 元素：重建一个新的 media pipeline，彻底甩掉「不可 seek」的坏状态 */
+          nextAudio = document.createElement('audio')
+          nextAudio.preload = 'metadata'
+          nextAudio.setAttribute('data-nm-audio', '')
+          nextAudio.setAttribute('data-nm-audio-id', String(track.id))
+          nextAudio.style.display = 'none'
+          document.body.appendChild(nextAudio)
+          bindAudio(nextAudio)
+          nextAudio.src = buildAudioUrl(track.id, state.quality)
+          nextAudio.load()
+          if (oldAudio && oldAudio !== nextAudio) {
+            try {
+              oldAudio.pause()
+            } catch (err) {
+              /* ignore */
+            }
+            if (oldAudio.parentNode) oldAudio.parentNode.removeChild(oldAudio)
+          }
+          clientLog('seek:recover-new-element', { target, seekableBefore: snapshot.seekable })
+          armSeekWatch(target)
+          return true
+        } catch (err) {
+          if (nextAudio && nextAudio.parentNode) nextAudio.parentNode.removeChild(nextAudio)
+          recoveryLogTarget = null
+          notifyToast('seekFailed')
+          patch({
+            seeking: false,
+            seekTarget: null,
+            position: Math.round(((audio && Number(audio.currentTime)) || 0) * 1000),
+          })
+          return false
+        }
+      }
+
       function seekSeconds(seconds) {
         if (!audio) return
+        lastSeekLogAt = Date.now()
         const wanted = Math.max(0, Number(seconds) || 0)
         const duration = audioDurationSeconds()
         const metadataReady = audio.readyState >= 1 && isFinite(Number(audio.duration)) && Number(audio.duration) > 0
@@ -1301,19 +1459,38 @@ window.__ModuleLoader__.load({
         const target = clamp(wanted, 0, duration * 1000) / 1000
         clearSeekTimers()
         lastTimeEmit = Date.now()
+        const rangesOf = (list) => {
+          const out = []
+          try {
+            for (let i = 0; i < Math.min(list.length, 3); i += 1) out.push([Math.round(list.start(i) * 10) / 10, Math.round(list.end(i) * 10) / 10])
+          } catch (err) { /* ignore */ }
+          return out
+        }
+        let srcHint = ''
+        try {
+          const match = /[?&]id=(\d+).*?[?&]level=([a-z]+)/.exec(String(audio.currentSrc || ''))
+          if (match) srcHint = match[1] + '/' + match[2]
+        } catch (err) { /* ignore */ }
         clientLog('seek:commit', {
           target,
           duration: Number(audio.duration) || 0,
           readyState: audio.readyState,
-          seekable: seekableCount(),
+          networkState: audio.networkState,
+          seekable: rangesOf(audio.seekable),
+          buffered: rangesOf(audio.buffered),
+          audioId: audio.dataset ? audio.dataset.nmAudioId : null,
+          srcHint,
           currentTime: Number(audio.currentTime) || 0,
         })
-        if (seekableCount() === 0) {
-          /* 音源不可 seek：直接提示并回到实际位置 */
-          pendingSeek = null
-          pendingSeekRatio = null
-          notifyToast('seekUnsupported')
-          patch({ seeking: false, seekTarget: null, position: Math.round((audio.currentTime || 0) * 1000) })
+        let seekEnd = 0
+        try {
+          if (audio.seekable && audio.seekable.length) seekEnd = Number(audio.seekable.end(audio.seekable.length - 1)) || 0
+        } catch (err) {
+          seekEnd = 0
+        }
+        if (seekableCount() === 0 || seekEnd < Number(audio.duration) - 2) {
+          /* 检测到不可 seek 的坏状态：直接重建 audio 上下文自愈，避免先跳目标再被钳回 0 */
+          beginSeekRecovery(target, seekableCount() === 0 ? 'seekable-empty' : 'seekable-short')
           return
         }
         patch({ seeking: true, seekTarget: target, position: Math.round(target * 1000) })
@@ -1424,6 +1601,8 @@ window.__ModuleLoader__.load({
         clearSeekTimers()
         pendingSeek = null
         pendingSeekRatio = null
+        recoveryLogTarget = null
+        lastSeekRecoveryAt = 0
         seekHoldCount = 0
         unbindAudio()
         listeners.clear()
@@ -5710,6 +5889,8 @@ window.__ModuleLoader__.load({
         /* 2) 全局 <audio>，挂在 body 上（可被测试与浏览器原生控件感知） */
         effect(() => {
           const audio = document.createElement('audio')
+          try { audio.dataset.nmAudioId = String(Date.now()) + '-' + Math.random().toString(36).slice(2, 6) } catch (err) { /* ignore */ }
+          clientLog('audio:created', { audioId: audio.dataset ? audio.dataset.nmAudioId : null })
           audio.preload = 'metadata'
           audio.setAttribute('data-nm-audio', '')
           audio.style.display = 'none'
