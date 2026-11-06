@@ -372,6 +372,21 @@ function sanitizePlayerState(input) {
 export function apply(ctx) {
   const cache = createCache()
   const bridge = new Bridge({ python: PYTHON, script: BRIDGE, cookieFile: COOKIE_FILE })
+  /* 本地真实 HTTP 基址：App 页面跑在 dsh-app:// 自定义协议下，媒体经该协议会丢 Content-Length，
+     导致 <audio> 判定不可 seek；音频需要绝对 http://127.0.0.1:<port> 地址。 */
+  let lastAuth = { authed: false, nickname: null, avatar: null, vipType: 0, userId: null, at: 0 }
+
+  const localHttpBase = () => {
+    try {
+      const ws = ctx.webServer || {}
+      let port = ws.listenedPort || 0
+      if (!port && ws.server && typeof ws.server.address === 'function') port = (ws.server.address() || {}).port || 0
+      return port ? 'http://127.0.0.1:' + port : ''
+    } catch (err) {
+      return ''
+    }
+  }
+
   /* ---------------- 插件内播放器：Agent 命令队列 + 客户端上报状态 ---------------- */
   const playerCommands = []
   let playerCommandSeq = 0
@@ -444,7 +459,20 @@ export function apply(ctx) {
   /** 统一包装：业务错误走信封，永远 200（流式路由自己处理响应） */
   const wrap = (handler) => async (req, res) => {
     try {
+      /* App 内部 dsh-app:// 协议会缓存 GET 响应，登录态等状态不能缓存 */
+      try {
+        if (!res.headersSent) res.headersSent || res.setHeader('Cache-Control', 'no-store, no-transform')
+        /* 页面在 dsh-app:// 下，走绝对 http 的请求是跨源：允许跨源读取（本机回环，无凭据） */
+        if (!res.headersSent) res.setHeader('Access-Control-Allow-Origin', '*')
+        if (!res.headersSent) res.setHeader('Access-Control-Allow-Headers', 'accept,content-type')
+        if (!res.headersSent) res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
+      } catch (err) { /* ignore */ }
       const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+      try {
+        if (url.pathname === '/netease-panel/api/status' || url.pathname === '/netease-panel/api/httpbase') {
+          log('[api-req]', req.method, url.pathname, url.search.slice(0, 60), 'ua=' + String(req.headers['user-agent'] || '').slice(0, 40))
+        }
+      } catch (err) { /* ignore */ }
       const data = await handler(url, req, res)
       if (res.writableEnded) return
       ok(res, data)
@@ -495,7 +523,9 @@ export function apply(ctx) {
       'accept=' + String(req.headers.accept || '-').slice(0, 40),
     )
     const headers = { 'User-Agent': UA, Referer: 'https://music.163.com/' }
-    if (req.headers.range) headers.Range = String(req.headers.range)
+    const rawRange = String(req.headers.range || '')
+    const fullRange = /^bytes=0-$/.test(rawRange.trim())
+    if (rawRange && !fullRange) headers.Range = rawRange
     let upstream
     try {
       upstream = await fetch(info.url, { headers, redirect: 'follow', signal: controller.signal })
@@ -510,8 +540,10 @@ export function apply(ctx) {
       if (res.writableEnded) return
       return fail(res, `音源返回 HTTP ${upstream.status}`, 'NETWORK')
     }
-    res.statusCode = upstream.status === 206 ? 206 : 200
-    const passthrough = ['content-type', 'content-length', 'content-range', 'accept-ranges']
+    res.statusCode = !fullRange && upstream.status === 206 ? 206 : 200
+    const passthrough = fullRange
+      ? ['content-type', 'content-length', 'accept-ranges']
+      : ['content-type', 'content-length', 'content-range', 'accept-ranges']
     for (const key of passthrough) {
       const value = upstream.headers.get(key)
       if (value) res.setHeader(key, value)
@@ -519,6 +551,7 @@ export function apply(ctx) {
     // 上游把 FLAC/无损也常标成 audio/mpeg，这里按真实编码覆盖，否则 <audio> 解码会犹豫
     const ext = String(info.type || '').toLowerCase().replace('.', '')
     res.setHeader('Content-Type', AUDIO_MIME[ext] || 'audio/mpeg')
+    res.setHeader('Access-Control-Allow-Origin', '*')
     if (!res.getHeader('accept-ranges')) res.setHeader('Accept-Ranges', 'bytes')
     // 音频流绝不能进浏览器缓存：被中断的局部响应被复用会让 <audio> 判定 seekable=[0,0]
     res.setHeader('Cache-Control', 'no-store, no-transform')
@@ -657,6 +690,16 @@ export function apply(ctx) {
     const data = await bridge.call('daily', {}, { timeoutMs: 40_000 })
     return { songs: (data && data.songs) || [], title: '每日推荐', subtitle: '' }
   }
+
+  try {
+    const ws = ctx.webServer || {}
+    let port = ws.port
+    try {
+      if (!port && ws.server && typeof ws.server.address === 'function') port = (ws.server.address() || {}).port
+    } catch (err) { /* ignore */ }
+    log('[host] webServer keys=' + JSON.stringify(Object.keys(ws)) + ' port=' + String(port) +
+      ' serverKeys=' + JSON.stringify(ws.server ? Object.keys(ws.server) : []))
+  } catch (err) { /* ignore */ }
 
   ctx.effect(() => {
     const tools = ctx.get('tools')
@@ -831,6 +874,115 @@ export function apply(ctx) {
     }
 
     const routes = [
+      /* 临时诊断：查看 clientModules 服务的 bundle 构建/缓存状态（排查完删除） */
+      route(
+        'clientmodules',
+        wrap(async (url) => {
+          const svc = ctx.get('clientModules')
+          if (!svc) return { error: 'no clientModules service' }
+          const id = '@local/netease-music'
+          const action = String(url.searchParams.get('action') || '')
+          const out = { keys: Object.keys(svc), proto: Object.getOwnPropertyNames(Object.getPrototypeOf(svc)) }
+          const safe = (name, fn) => {
+            try { out[name] = fn() } catch (err) { out[name] = 'ERR: ' + String(err && err.message || err) }
+          }
+          const marker = (text) => ({
+            hasAuthHttp: String(text).includes('auth-http'),
+            hasStatusAuth: String(text).includes('status:auth'),
+            bytes: String(text).length,
+          })
+          if (action === 'graph') {
+            try {
+              out.graphJson = JSON.stringify(svc.graph()).slice(0, 4000)
+            } catch (err) {
+              out.graphErr = String(err && err.message || err)
+            }
+            return out
+          }
+          if (action === 'bundle') {
+            const candidates = [
+              'http://127.0.0.1/api/client-plugins/' + id,
+              'http://127.0.0.1/api/client-plugins/' + id + '/client.js',
+              'http://127.0.0.1/api/client-plugin/' + id,
+              'http://127.0.0.1/api/client-plugins?package=' + id,
+            ]
+            const results = []
+            for (const target of candidates) {
+              try {
+                const res = await svc.fetchBundle(new Request(target, { method: 'GET' }))
+                const text = await res.text()
+                results.push({ target, status: res.status, ...marker(text), head: text.slice(0, 120) })
+              } catch (err) {
+                results.push({ target, error: String(err && err.message || err) })
+              }
+            }
+            out.bundles = results
+            return out
+          }
+          if (action === 'rebuild') {
+            try { svc.notifyGraphChanged?.() } catch (err) { out.notifyErr = String(err && err.message || err) }
+            try { svc.reconcilePackage?.(id) } catch (err) { out.reconcileErr = String(err && err.message || err) }
+            await new Promise((resolve) => setTimeout(resolve, 800))
+            safe('afterRebuilt', () => svc.rebuilt(id))
+            safe('afterBaseline', () => svc.artifactBaseline(id))
+            safe('dirty', () => svc.dirty)
+          }
+          safe('clientPath', () => svc.clientPath(id))
+          safe('artifactBaseline', () => svc.artifactBaseline(id))
+          safe('rebuilt', () => svc.rebuilt(id))
+          return out
+        }),
+      ),
+
+      /* 轻量登录态：不等待引擎，返回最近一次快照（页面 /status 读取失败时的兜底） */
+      route(
+        'auth',
+        wrap(async () => ({
+          authed: !!lastAuth.authed,
+          nickname: lastAuth.nickname,
+          avatar: lastAuth.avatar,
+          vipType: lastAuth.vipType,
+          userId: lastAuth.userId,
+          at: lastAuth.at,
+          engine: existsSync(PYTHON) ? 'installed' : 'installing',
+        })),
+      ),
+
+      /* 真实 HTTP 基址（客户端给 <audio> 用；dsh-app:// 协议会丢 Content-Length） */
+      route(
+        'httpbase',
+        wrap(async () => ({ base: localHttpBase() })),
+      ),
+
+      /* 临时诊断页：同源 + 各种 audio 创建方式的 seekable 对比（排查完删除） */
+      route(
+        'testpage',
+        (req, res) => {
+          const id = String(new URL(req.url || '/', 'http://x').searchParams.get('id') || '3456695878')
+          res.statusCode = 200
+          res.setHeader('Content-Type', 'text/html; charset=utf-8')
+          res.end(`<!doctype html><meta charset="utf-8"><title>seek test</title>
+<audio id="a1" preload="metadata" src="/netease-panel/api/audio?id=${id}&level=standard&_=1"></audio>
+<script>
+const a2 = document.createElement('audio')
+a2.preload = 'metadata'
+a2.src = '/netease-panel/api/audio?id=${id}&level=standard&_=2'
+document.body.appendChild(a2)
+const a3 = document.createElement('audio')
+a3.preload = 'metadata'
+a3.style.display = 'none'
+a3.src = '/netease-panel/api/audio?id=${id}&level=standard&_=3'
+document.body.appendChild(a3)
+window.__info = () => [1,2,3].map((n) => {
+  const a = document.getElementById('a' + n) || document.querySelectorAll('audio')[n - 1]
+  return { n, duration: a && a.duration, readyState: a && a.readyState, seekable: a && a.seekable.length ? [a.seekable.start(0), a.seekable.end(0)] : [], networkState: a && a.networkState }
+})
+window.__play = () => Promise.all([1,2,3].map((n) => { const a = document.querySelectorAll('audio')[n-1]; return a.play().catch(() => {}) }))
+window.__seek = (n, t) => { const a = document.querySelectorAll('audio')[n-1]; try { a.currentTime = t } catch (e) { return String(e) } }
+</script>`)
+        },
+      ),
+
       /* 客户端诊断日志（临时/低频）：客户端把关键事件 POST 到这里，落到 bridge.log 便于真机排查 */
       route(
         'clientlog',
@@ -894,6 +1046,7 @@ export function apply(ctx) {
             engine: existsSync(PYTHON) ? 'installed' : install.state === 'running' ? 'installing' : install.state === 'failed' ? 'failed' : 'missing',
             engineDir: ENGINE_DIR,
             mcpEntry: MCP_ENTRY,
+            httpBase: localHttpBase(),
             install: {
               state: install.state,
               phase: install.phase,
@@ -904,6 +1057,17 @@ export function apply(ctx) {
           }
           try {
             const status = await bridge.call('status', {}, { timeoutMs: 20_000 })
+            try {
+              log('[status-resp]', 'authed=' + String(status && status.authed), 'nickname=' + String((status && status.nickname) || ''))
+              lastAuth = {
+                authed: !!(status && status.authed),
+                nickname: (status && status.nickname) || null,
+                avatar: (status && status.avatar) || null,
+                vipType: Number((status && status.vipType) || 0),
+                userId: (status && status.userId) || null,
+                at: Date.now(),
+              }
+            } catch (err) { /* ignore */ }
             return { bridge: 'ready', ...base, ...status }
           } catch (err) {
             return {

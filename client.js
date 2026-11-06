@@ -532,14 +532,30 @@ window.__ModuleLoader__.load({
       return body.data
     }
 
+    async function apiGetViaHttp(path) {
+      /* App 页面在 dsh-app:// 协议下，状态类请求经协议可能被缓存/重放；拿到真实 HTTP 基址后走绝对地址 */
+      if (!audioHttpBase) return null
+      const sep = path.indexOf('?') === -1 ? '?' : '&'
+      const res = await fetch(audioHttpBase + '/netease-panel/api' + path + sep + '_=' + Date.now(), {
+        method: 'GET',
+        headers: { accept: 'application/json' },
+        credentials: 'same-origin',
+        cache: 'no-store',
+      })
+      return readEnvelope(res)
+    }
+
     async function apiGet(path, signal) {
       let res
       try {
-        res = await fetch(API + path, {
+        /* 加时间戳 + no-store：App 内部 dsh-app:// 协议会缓存 GET，导致登录态等状态读到旧值 */
+        const sep = path.indexOf('?') === -1 ? '?' : '&'
+        res = await fetch(API + path + sep + '_=' + Date.now(), {
           method: 'GET',
           headers: { accept: 'application/json' },
           signal,
           credentials: 'same-origin',
+          cache: 'no-store',
         })
       } catch (err) {
         if (isAbort(err)) throw err
@@ -565,7 +581,7 @@ window.__ModuleLoader__.load({
       return readEnvelope(res)
     }
 
-    const CLIENT_BUILD = 'v1.0.2 · 2026-11-06 11:19'
+    const CLIENT_BUILD = 'v1.3.2 · auth-fixed 2026-11-06 13:47'
     const CLIENT_LOG_STORE_KEY = 'netease-music:clientlog-times'
     const clientLogTimes = []
     const clientLogPriorityTimes = []
@@ -808,9 +824,64 @@ window.__ModuleLoader__.load({
         }, 2400)
       }
 
-      function buildAudioUrl(id, level) {
-        /* 每次加载都带缓存击穿参数：避免浏览器复用被中断的局部缓存响应导致 audio 永久不可 seek */
-        return API + '/audio?' + qs({ id, level: level || state.quality || 'auto', _: Date.now() })
+      function adoptHttpBase(base) {
+      const value = typeof base === 'string' ? base.replace(/\/$/, '') : ''
+      if (!value || value === audioHttpBase) return
+      audioHttpBase = value
+      /* 已经用相对地址加载过：切到绝对 http 地址（保留进度与播放状态），否则媒体永远不可 seek */
+      try {
+        if (audio && state.current && state.current.id && !/^https?:/.test(String(audio.currentSrc || audio.src || ''))) {
+          const seconds = Number(audio.currentTime) || 0
+          const playing = !audio.paused
+          pendingResume = { seconds, playing }
+          const url = buildAudioUrl(state.current.id, state.quality)
+          audio.src = url
+          audio.load()
+          patch({ loading: true })
+          clientLog('audio:switch-http', { url: url.replace(/[?&]_=\d+/, ''), seconds })
+        }
+      } catch (err) { /* ignore */ }
+      clientLog('audio:http-base', { base: value })
+    }
+
+    function buildAudioUrl(id, level) {
+        /* 每次加载都带缓存击穿参数：避免浏览器复用被中断的局部缓存响应导致 audio 永久不可 seek。
+           App 页面在 dsh-app:// 协议下，媒体必须用真实 http 绝对地址（否则丢 Content-Length，不可 seek）。 */
+        const base = audioHttpBase ? audioHttpBase + '/netease-panel/api' : API
+        return base + '/audio?' + qs({ id, level: level || state.quality || 'auto', _: Date.now() })
+      }
+
+      let probedAudioStream = false
+      async function probeAudioStream(url) {
+        if (probedAudioStream) return
+        probedAudioStream = true
+        try {
+          const res = await fetch(url, { method: 'GET', headers: { Range: 'bytes=0-1023' }, cache: 'no-store' })
+          const headers = {}
+          ;['content-type', 'content-length', 'content-range', 'accept-ranges', 'transfer-encoding', 'cache-control', 'etag'].forEach((key) => {
+            headers[key] = res.headers.get(key)
+          })
+          try { await res.body.cancel() } catch (err) { /* ignore */ }
+          const snap = () => ({
+            seekable: audio && audio.seekable && audio.seekable.length ? [audio.seekable.start(0), audio.seekable.end(0)] : [],
+            readyState: audio ? audio.readyState : -1,
+            networkState: audio ? audio.networkState : -1,
+            duration: audio ? Number(audio.duration) || 0 : 0,
+          })
+          clientLog('probe:audio', {
+            status: res.status,
+            headers,
+            origin: typeof location !== 'undefined' ? location.origin : '',
+            baseURI: typeof document !== 'undefined' ? document.baseURI : '',
+            srcAbs: audio ? String(audio.currentSrc || '').replace(/[?&]_=\d+/, '').slice(0, 140) : '',
+            ...snap(),
+          })
+          setTimeout(() => {
+            try { clientLog('probe:audio-later', snap()) } catch (err) { /* ignore */ }
+          }, 1500)
+        } catch (err) {
+          clientLog('probe:audio-error', { message: String((err && err.message) || err) })
+        }
       }
 
       function syncAudioLevel() {
@@ -1159,7 +1230,9 @@ window.__ModuleLoader__.load({
         }
         syncAudioLevel()
         try {
-          audio.src = buildAudioUrl(track.id, state.quality)
+          const nextAudioUrl = buildAudioUrl(track.id, state.quality)
+        audio.src = nextAudioUrl
+        probeAudioStream(nextAudioUrl)
           audio.load()
         } catch (err) {
           patch({ error: 'playback', loading: false })
@@ -1504,6 +1577,8 @@ window.__ModuleLoader__.load({
           buffered: rangesOf(audio.buffered),
           audioId: audio.dataset ? audio.dataset.nmAudioId : null,
           srcHint,
+          httpBase: audioHttpBase || '',
+          srcOrigin: (() => { try { return new URL(String(audio.currentSrc || audio.src || '')).origin } catch (err) { return '' } })(),
           currentTime: Number(audio.currentTime) || 0,
         })
         let seekEnd = 0
@@ -1656,6 +1731,7 @@ window.__ModuleLoader__.load({
         toggleQueue,
         retryCurrent,
         setQuality,
+        adoptHttpBase,
         dispose,
       }
     }
@@ -1782,18 +1858,65 @@ window.__ModuleLoader__.load({
       const alive = React.useRef(true)
       const request = React.useCallback(async () => {
         try {
-          const data = await apiGet('/status')
+          let data = null
+          if (audioHttpBase) {
+            try {
+              data = await apiGetViaHttp('/status')
+            } catch (err) {
+              data = null
+            }
+          }
+          if (!data) data = await apiGet('/status')
+          if (!data) {
+            /* /status 在 App 协议下偶发读取失败：用轻量 /auth 兜底（同一登录态） */
+            try {
+              const auth = await apiGetViaHttp('/auth').catch(() => null) || await apiGet('/auth')
+              if (auth && typeof auth.authed === 'boolean') {
+                data = {
+                  authed: auth.authed,
+                  nickname: auth.nickname,
+                  avatar: auth.avatar,
+                  vipType: auth.vipType,
+                  userId: auth.userId,
+                  engine: auth.engine || 'installed',
+                  install: { state: 'idle', installed: true },
+                  bridge: 'ready',
+                  httpBase: audioHttpBase,
+                }
+              }
+            } catch (err) { /* ignore */ }
+          }
+          if (data && data.httpBase) player.adoptHttpBase(data.httpBase)
+          try {
+            clientLog('status:auth', {
+              authed: !!(data && data.authed),
+              nickname: (data && data.nickname) || null,
+              anonymous: !!(data && data.anonymous),
+              bridge: (data && data.bridge) || null,
+              httpBase: (data && data.httpBase) || null,
+            })
+          } catch (err) { /* ignore */ }
           if (alive.current) setState({ loading: false, data, error: null })
         } catch (err) {
+          try {
+            clientLog('status:error', {
+              message: String((err && err.message) || err),
+              code: (err && err.code) || null,
+              status: (err && err.status) || null,
+              viaHttp: !!audioHttpBase,
+            })
+          } catch (logErr) { /* ignore */ }
           if (alive.current) setState((prev) => ({ loading: false, data: prev.data, error: (err && err.message) || '连接失败' }))
         }
       }, [])
       React.useEffect(() => {
         alive.current = true
         request()
+        const retry = setTimeout(() => { if (alive.current) request() }, 2500)
         const timer = setInterval(request, 20000)
         return () => {
           alive.current = false
+          clearTimeout(retry)
           clearInterval(timer)
         }
       }, [request])
@@ -1819,6 +1942,10 @@ window.__ModuleLoader__.load({
     /* ------------------------------------------------------------------ *
      * v2 全局 UI store：dock 形态 / Now Playing / 播放页模式 / 登录态
      * ------------------------------------------------------------------ */
+    /* App 页面在 dsh-app:// 自定义协议下，媒体请求经该协议会丢 Content-Length（不可 seek）；
+       用 Host 提供的真实 http 基址（/status.httpBase）给 <audio> 用绝对地址。 */
+    let audioHttpBase = ''
+
     /* 音乐面板是否挂载：侧栏迷你播放器据此判断是否让位给面板内 dock */
     let pageMounted = false
     const pageMountedListeners = new Set()
@@ -4370,7 +4497,7 @@ window.__ModuleLoader__.load({
       const artistList = authed ? (favoriteArtists.length ? favoriteArtists : homeArtists) : homeArtists
       const minePlaylists = toArray(mine.data && mine.data.playlists)
 
-      const showLoginBanner = !authed && !detail
+      const showLoginBanner = !!status.data && !authed && !detail
       const engineInfo = (status.data && status.data.engine) || ''
       const installInfo = (status.data && status.data.install) || {}
       const engineReady = engineInfo === 'installed' || !!installInfo.installed || install.state === 'done'
@@ -4735,7 +4862,7 @@ window.__ModuleLoader__.load({
               }) : null,
               showLoginBanner && !engineBroken ? h(LoginBanner, { t, onLogin: openLogin }) : null,
               showBody || detail ? body : null),
-            h('div', { className: 'nm-build-stamp', 'data-nm': 'build-stamp' }, t('footer.updated') + ' ' + CLIENT_BUILD))),
+            h('div', { className: 'nm-build-stamp', 'data-nm': 'build-stamp' }, t('footer.updated') + ' ' + CLIENT_BUILD + ' · ' + (status.data ? (authed ? '登录态：已登录' : '登录态：未登录') : (status.error ? '登录态：读取失败' : '登录态：加载中'))))),
         h(PlayerDock),
         loginOpen
           ? h(LoginModal, {
@@ -5933,6 +6060,35 @@ window.__ModuleLoader__.load({
             }
           }
         }, 'netease-music: audio')
+
+        /* 2.1) 拿真实 HTTP 基址：dsh-app:// 协议会丢 Content-Length，音频必须走绝对 http 地址才能 seek */
+        if (!audioHttpBase) {
+          effect(() => {
+            let alive = true
+            let timer = null
+            const load = () => {
+              fetch(API + '/httpbase?_=' + Date.now(), { cache: 'no-store', credentials: 'same-origin' })
+                .then((res) => res.json())
+                .then((body) => {
+                  if (!alive) return
+                  const base = body && body.data && body.data.base
+                  if (base) {
+                    player.adoptHttpBase(base)
+                    if (timer) { clearInterval(timer); timer = null }
+                  } else {
+                    clientLog('audio:http-base-fail', { body: JSON.stringify(body || null).slice(0, 160) })
+                  }
+                })
+                .catch((err) => clientLog('audio:http-base-fail', { message: String((err && err.message) || err) }))
+            }
+            load()
+            timer = setInterval(load, 15000)
+            return () => {
+              alive = false
+              if (timer) clearInterval(timer)
+            }
+          }, 'netease-music: http-base')
+        }
 
         /* 进度条拖动：全局 pointerup / pointercancel 兜底提交 */
         effect(() => {
