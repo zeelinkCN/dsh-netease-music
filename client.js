@@ -124,6 +124,7 @@ window.__ModuleLoader__.load({
       'vip': 'VIP',
       'status.online': '在线',
       'status.starting': '连接中',
+      'status.authPending': '登录态恢复中…',
       'status.offline': '离线',
       'status.anonymous': '未登录',
       'engine.title': '数据引擎未就绪',
@@ -147,6 +148,7 @@ window.__ModuleLoader__.load({
       'fmt.locale': 'zh-CN',
       'toast.playlistError': '无法播放该内容，请稍后重试',
       'toast.logoutDone': '已退出登录',
+      'toast.logoutFailed': '退出登录失败，请重试',
       'toast.queueAdded': '已加入播放队列',
       'toast.loginExpired': '二维码已过期',
       'quality.title': '音质',
@@ -327,6 +329,7 @@ window.__ModuleLoader__.load({
       'vip': 'VIP',
       'status.online': 'Online',
       'status.starting': 'Connecting',
+      'status.authPending': 'Restoring sign-in…',
       'status.offline': 'Offline',
       'status.anonymous': 'Signed out',
       'engine.title': 'Music engine is not ready',
@@ -350,6 +353,7 @@ window.__ModuleLoader__.load({
       'fmt.locale': 'en-US',
       'toast.playlistError': 'Could not play this content. Try again later.',
       'toast.logoutDone': 'Signed out',
+      'toast.logoutFailed': 'Sign out failed, please retry',
       'toast.queueAdded': 'Added to queue',
       'toast.loginExpired': 'QR code expired',
       'quality.title': 'Audio Quality',
@@ -605,7 +609,7 @@ window.__ModuleLoader__.load({
       return readEnvelope(res)
     }
 
-    const CLIENT_BUILD = 'v1.1.0 · 2026-11-06 14:15'
+    const CLIENT_BUILD = 'v1.1.1 · 2026-11-10 23:25'
     const CLIENT_LOG_STORE_KEY = 'netease-music:clientlog-times'
     const clientLogTimes = []
     const clientLogPriorityTimes = []
@@ -794,6 +798,8 @@ window.__ModuleLoader__.load({
       let toastTimer = null
       const shuffleHistory = []
       let pendingResume = null
+      let streamToken = 0
+      const resumeTimers = new Set()
       let pendingSeek = null
       let pendingSeekRatio = null
       let lastSeekRecoveryAt = 0
@@ -876,12 +882,12 @@ window.__ModuleLoader__.load({
         if (audio && state.current && state.current.id && !/^https?:/.test(String(audio.currentSrc || audio.src || ''))) {
           const seconds = Number(audio.currentTime) || 0
           const playing = !audio.paused
-          pendingResume = { seconds, playing }
-          const url = buildAudioUrl(state.current.id, state.quality)
-          audio.src = url
-          audio.load()
+          const gen = nextStreamToken()
+          pendingResume = { seconds, playing, token: gen }
+          const nextAudio = replaceAudioSource(state.current, state.quality, gen)
+          if (!nextAudio) throw new Error('audio element unavailable')
           patch({ loading: true })
-          clientLog('audio:switch-http', { url: url.replace(/[?&]_=\d+/, ''), seconds })
+          clientLog('audio:switch-http', { url: buildAudioUrl(state.current.id, state.quality).replace(/[?&]_=\d+/, ''), seconds })
         }
       } catch (err) { /* ignore */ }
       clientLog('audio:http-base', { base: value })
@@ -973,11 +979,36 @@ window.__ModuleLoader__.load({
         return 0
       }
 
+      function clearResumeTimers() {
+        resumeTimers.forEach((timer) => clearTimeout(timer))
+        resumeTimers.clear()
+      }
+
+      function scheduleResumeTimer(fn, delay) {
+        const timer = setTimeout(() => {
+          resumeTimers.delete(timer)
+          try {
+            fn()
+          } catch (err) {
+            /* ignore */
+          }
+        }, delay)
+        resumeTimers.add(timer)
+        return timer
+      }
+
+      function nextStreamToken() {
+        streamToken += 1
+        clearResumeTimers()
+        return streamToken
+      }
+
       function bindAudio(el) {
         if (!el) return
         unbindAudio()
         audio = el
         el.preload = 'metadata'
+        el.muted = !!state.muted
         el.volume = state.volume
         syncAudioLevel()
         const on = (name, fn) => {
@@ -1028,13 +1059,15 @@ window.__ModuleLoader__.load({
             patch({ position: Math.round(target * 1000), seeking: true, seekTarget: target })
             armSeekWatch(target)
           }
-          if (!pendingResume) return
+          if (!pendingResume || audio !== el) return
           const resume = pendingResume
-          pendingResume = null
-          const limit = isFinite(audio.duration) && audio.duration > 0 ? Math.max(0, audio.duration - 0.2) : resume.seconds
-          const target = Math.min(resume.seconds, limit)
+          const gen = streamToken
+          if (Number(resume.token) !== gen) return
+          if (String(resume.token) !== String(audio.dataset.nmStreamToken || '')) return
           const applyResume = (attempt) => {
-            if (!audio) return
+            if (!audio || audio !== el || streamToken !== gen || pendingResume !== resume) return
+            if (Number(resume.token) !== streamToken) return
+            if (String(resume.token) !== String(audio.dataset.nmStreamToken || '')) return
             if (recoveryLogTarget != null) {
               /* 自愈重载后给 seekable 一点恢复时间再落点；真实坏状态最终仍会走 skip/toast */
               let end = 0
@@ -1045,10 +1078,12 @@ window.__ModuleLoader__.load({
               }
               const usable = seekableCount() > 0 && end >= (Number(audio.duration) || 0) - 2
               if (!usable && attempt < 10) {
-                setTimeout(() => applyResume(attempt + 1), 150)
+                scheduleResumeTimer(() => applyResume(attempt + 1), 150)
                 return
               }
             }
+            if (!audio || audio !== el || streamToken !== gen || pendingResume !== resume) return
+            const target = Math.max(0, Number(resume.seconds) || 0)
             try {
               audio.currentTime = target
             } catch (err) {
@@ -1063,6 +1098,8 @@ window.__ModuleLoader__.load({
               })
               recoveryLogTarget = null
             }
+            if (pendingResume !== resume || streamToken !== gen) return
+            pendingResume = null
             if (resume.playing) requestPlay()
             else patch({ playing: false, loading: false })
           }
@@ -1101,7 +1138,14 @@ window.__ModuleLoader__.load({
             beginSeekRecovery(Number(landedTarget), 'seeked-miss')
             return
           }
-          recoveryLogTarget = null
+          if (recoveryLogTarget != null) {
+            /* 兜底：即便 loadedmetadata 的 applyResume 未走到日志分支，实际 seeked 落地也补一条 */
+            clientLog('seek:recover-done', {
+              currentTime: actual,
+              seekable: rangeSnapshot('seekable'),
+            })
+            recoveryLogTarget = null
+          }
           patch({
             seeking: seekHoldCount > 0,
             seekTarget: null,
@@ -1115,6 +1159,8 @@ window.__ModuleLoader__.load({
         })
         on('pause', () => {
           syncMediaState(false)
+          /* 切音质 load() 会触发 pause；此时 pendingResume.playing 才代表用户真实意图 */
+          if (pendingResume && pendingResume.playing && state.loading) return
           patch({ playing: false })
         })
         on('waiting', () => patch({ loading: true }))
@@ -1164,6 +1210,32 @@ window.__ModuleLoader__.load({
         audio = null
       }
 
+      /* 每次换源都新建 audio 元素：旧元素上排队的 loadedmetadata 等事件随元素/监听器一起废弃，
+         避免快速连切时旧事件消费新的 pendingResume。 */
+      function replaceAudioSource(track, level, token) {
+        if (!track) return null
+        const previous = audio
+        const next = document.createElement('audio')
+        next.preload = 'metadata'
+        next.setAttribute('data-nm-audio', '')
+        next.setAttribute('data-nm-audio-id', String(track.id))
+        next.style.display = 'none'
+        document.body.appendChild(next)
+        bindAudio(next)
+        next.dataset.nmStreamToken = String(token)
+        next.src = buildAudioUrl(track.id, level)
+        next.load()
+        if (previous && previous !== next) {
+          try {
+            previous.pause()
+          } catch (err) {
+            /* ignore */
+          }
+          if (previous.parentNode) previous.parentNode.removeChild(previous)
+        }
+        return next
+      }
+
       function requestPlay() {
         if (!audio || !state.current) return
         patch({ loading: true })
@@ -1196,6 +1268,7 @@ window.__ModuleLoader__.load({
           patch({ current: null, playing: false })
           return
         }
+        const loadToken = nextStreamToken()
         pendingResume = null
         pendingSeek = null
         pendingSeekRatio = null
@@ -1223,7 +1296,8 @@ window.__ModuleLoader__.load({
         syncAudioLevel()
         try {
           const nextAudioUrl = buildAudioUrl(track.id, state.quality)
-        audio.src = nextAudioUrl
+          audio.dataset.nmStreamToken = String(loadToken)
+          audio.src = nextAudioUrl
           audio.load()
         } catch (err) {
           patch({ error: 'playback', loading: false })
@@ -1247,17 +1321,23 @@ window.__ModuleLoader__.load({
           refreshUrlInfo()
           return
         }
-        const shouldPlay = state.playing
-        pendingResume = {
-          seconds: audio.currentTime || state.position / 1000 || 0,
-          playing: shouldPlay,
-        }
+        const qualityToken = nextStreamToken()
+        /* 旧 seek 意图优先并入 resume，避免 loadedmetadata 先应用旧 pendingSeek */
+        const seekIntent = pendingSeek != null ? pendingSeek : null
+        const intentSeconds = pendingResume
+          ? Math.max(0, Number(pendingResume.seconds) || 0)
+          : (seekIntent != null ? Math.max(0, Number(seekIntent) || 0) : (Number(audio.currentTime) || state.position / 1000 || 0))
+        const intentPlaying = pendingResume ? !!pendingResume.playing : !!state.playing
+        pendingSeek = null
+        pendingSeekRatio = null
+        pendingResume = { seconds: intentSeconds, playing: intentPlaying, token: qualityToken }
         patch({ seeking: false, seekTarget: null })
         patch({ loading: true })
         refreshUrlInfo()
         try {
-          audio.src = buildAudioUrl(track.id, next)
-          audio.load()
+          /* 新建 audio 元素，旧元素的排队 metadata 不可能再消费本次 pendingResume */
+          const nextAudio = replaceAudioSource(track, next, qualityToken)
+          if (!nextAudio) throw new Error('audio element unavailable')
         } catch (err) {
           pendingResume = null
           patch({ error: 'playback', loading: false, playing: false })
@@ -1333,19 +1413,14 @@ window.__ModuleLoader__.load({
           loadCurrent(true)
           return
         }
-        if (state.playing) {
-          try {
-            audio.pause()
-          } catch (err) {
-            /* ignore */
-          }
-        } else {
-          requestPlay()
-        }
+        if (state.playing) pause()
+        else resume()
       }
 
       function pause() {
         if (!state.current || !audio) return
+        /* 用户 pause 优先于切音质/恢复的旧意图 */
+        if (pendingResume) pendingResume.playing = false
         try {
           audio.pause()
         } catch (err) {
@@ -1356,6 +1431,7 @@ window.__ModuleLoader__.load({
 
       function resume() {
         if (!state.current) return
+        if (pendingResume) pendingResume.playing = true
         if (state.error) {
           loadCurrent(true)
           return
@@ -1492,6 +1568,7 @@ window.__ModuleLoader__.load({
          每 5 秒最多恢复一次；恢复后仍失败则提示并回到真实位置。 */
       function beginSeekRecovery(targetSeconds, reason) {
         lastSeekLogAt = Date.now()
+        const recoveryToken = nextStreamToken()
         const track = state.current
         const target = Math.max(0, Number(targetSeconds) || 0)
         const snapshot = {
@@ -1524,7 +1601,7 @@ window.__ModuleLoader__.load({
         pendingSeek = null
         pendingSeekRatio = null
         clearSeekTimers()
-        pendingResume = { seconds: target, playing: !!state.playing }
+        pendingResume = { seconds: target, playing: !!state.playing, token: recoveryToken }
         patch({
           seeking: true,
           seekTarget: target,
@@ -1542,6 +1619,7 @@ window.__ModuleLoader__.load({
           nextAudio.style.display = 'none'
           document.body.appendChild(nextAudio)
           bindAudio(nextAudio)
+          nextAudio.dataset.nmStreamToken = String(recoveryToken)
           nextAudio.src = buildAudioUrl(track.id, state.quality)
           nextAudio.load()
           if (oldAudio && oldAudio !== nextAudio) {
@@ -1572,6 +1650,30 @@ window.__ModuleLoader__.load({
         if (!audio) return
         lastSeekLogAt = Date.now()
         const wanted = Math.max(0, Number(seconds) || 0)
+        if (pendingResume) {
+          /* 切音质/恢复过程中用户 seek：更新待恢复意图，加载完成以最新目标为准 */
+          const durationSec = audioDurationSeconds()
+          const maxTarget = durationSec ? Math.max(0, durationSec * 1000 - 250) : wanted
+          const target = durationSec ? clamp(wanted, 0, maxTarget) / 1000 : wanted / 1000
+          pendingResume.seconds = target
+          /* 不覆盖 playing：只由显式 pause()/resume() 改播放意图 */
+          clientLog('seek:commit', {
+            target,
+            duration: durationSec,
+            readyState: audio.readyState,
+            seekable: seekableCount(),
+            currentTime: Number(audio.currentTime) || 0,
+          })
+          patch({ seeking: true, seekTarget: target, position: Math.round(target * 1000) })
+          if (audio.readyState >= 1) {
+            try {
+              audio.currentTime = target
+            } catch (err) {
+              /* loadedmetadata 应用 */
+            }
+          }
+          return
+        }
         const duration = audioDurationSeconds()
         const metadataReady = audio.readyState >= 1 && isFinite(Number(audio.duration)) && Number(audio.duration) > 0
         if (!duration || !metadataReady) {
@@ -1589,7 +1691,8 @@ window.__ModuleLoader__.load({
           armSeekWatch(pendingSeek)
           return
         }
-        const target = clamp(wanted, 0, duration * 1000) / 1000
+        /* 靠近结尾留 0.25s，避免 seek 到 duration 立刻触发 ended/自动切歌 */
+        const target = clamp(wanted, 0, Math.max(0, duration * 1000 - 250)) / 1000
         clearSeekTimers()
         lastTimeEmit = Date.now()
         const rangesOf = (list) => {
@@ -1658,6 +1761,15 @@ window.__ModuleLoader__.load({
 
       function seekRatio(ratio) {
         const value = clamp(ratio, 0, 1)
+        if (pendingResume) {
+          const durationSec = audioDurationSeconds() || (state.duration > 0 ? state.duration / 1000 : 0)
+          if (durationSec > 0) seekSeconds(value * durationSec * 1000)
+          else {
+            pendingResume.seconds = 0
+            patch({ seeking: true, seekTarget: 0, position: 0 })
+          }
+          return
+        }
         const hasAudioDuration = !!audio && audio.readyState >= 1 && isFinite(Number(audio.duration)) && Number(audio.duration) > 0
         if (hasAudioDuration) {
           seekSeconds(value * Number(audio.duration) * 1000)
@@ -1734,8 +1846,10 @@ window.__ModuleLoader__.load({
         if (toastTimer) clearTimeout(toastTimer)
         toastTimer = null
         clearSeekTimers()
+        clearResumeTimers()
         pendingSeek = null
         pendingSeekRatio = null
+        pendingResume = null
         recoveryLogTarget = null
         lastSeekRecoveryAt = 0
         seekHoldCount = 0
@@ -1894,47 +2008,135 @@ window.__ModuleLoader__.load({
     function useStatus() {
       const [state, setState] = React.useState({ loading: true, data: null, error: null })
       const alive = React.useRef(true)
+      const requestSeq = React.useRef(0)
       const request = React.useCallback(async () => {
+        const seq = ++requestSeq.current
+        const isLatest = () => alive.current && seq === requestSeq.current
         try {
           let data = null
+          let statusData = null
+          let firstError = null
           if (audioHttpBase) {
             try {
               data = await apiGetViaHttp('/status')
             } catch (err) {
-              data = null
+              firstError = firstError || err
             }
           }
-          if (!data) data = await apiGet('/status')
+          if (!isLatest()) return
           if (!data) {
-            /* /status 在 App 协议下偶发读取失败：用轻量 /auth 兜底（同一登录态） */
             try {
-              const auth = await apiGetViaHttp('/auth').catch(() => null) || await apiGet('/auth')
-              if (auth && typeof auth.authed === 'boolean') {
-                data = {
-                  authed: auth.authed,
-                  nickname: auth.nickname,
-                  avatar: auth.avatar,
-                  vipType: auth.vipType,
-                  userId: auth.userId,
-                  engine: auth.engine || 'installed',
-                  install: { state: 'idle', installed: true },
-                  bridge: 'ready',
-                  httpBase: audioHttpBase,
+              data = await apiGet('/status')
+            } catch (err) {
+              firstError = firstError || err
+            }
+          }
+          if (!isLatest()) return
+          if (data) statusData = data
+          if (statusData && statusData.bridge === 'error') {
+            /* /status 成功但引擎异常：仍要用 /auth 确认登录态，不能当成未登录 */
+            firstError = firstError || new Error(statusData.error || statusData.code || '数据引擎未就绪')
+            data = null
+          }
+          if (!data) {
+            /* /status 不可达或 bridge 异常时用轻量 /auth 兜底；bridge 状态由 engine 推导，避免谎报 ready */
+            try {
+              let auth = null
+              if (audioHttpBase) {
+                try {
+                  auth = await apiGetViaHttp('/auth')
+                } catch (err) {
+                  auth = null
                 }
               }
-            } catch (err) { /* ignore */ }
+              if (!isLatest()) return
+              if (!auth) auth = await apiGet('/auth')
+              if (!isLatest()) return
+              if (auth && typeof auth.authed === 'boolean') {
+                const engine = auth.engine || (auth.authed ? 'installed' : 'missing')
+                const authData = {
+                  authed: !!auth.authed,
+                  nickname: auth.nickname || null,
+                  avatar: auth.avatar || null,
+                  vipType: Number(auth.vipType) || 0,
+                  userId: auth.userId != null ? String(auth.userId) : null,
+                  engine,
+                  install: auth.install || { state: 'idle', installed: engine === 'installed' },
+                  bridge: auth.bridge || (engine === 'installed' ? 'ready' : engine === 'installing' ? 'starting' : 'error'),
+                  httpBase: audioHttpBase,
+                  auth: auth.auth || (auth.authPending ? 'unverified' : null),
+                  authPending: !!(auth.authPending || auth.auth === 'unverified'),
+                  authError: auth.authError || auth.error || null,
+                  error: auth.error || null,
+                }
+                if (statusData) {
+                  /* 保留 /status 的 engine/bridge/install 诊断；登录态用 /auth 的结果 */
+                  data = Object.assign({}, statusData, {
+                    authed: authData.authed,
+                    nickname: authData.nickname || statusData.nickname || null,
+                    avatar: authData.avatar || statusData.avatar || null,
+                    vipType: authData.vipType || Number(statusData.vipType) || 0,
+                    userId: authData.userId != null ? authData.userId : statusData.userId,
+                    engine: statusData.engine || authData.engine,
+                    install: statusData.install || authData.install,
+                    bridge: statusData.bridge || authData.bridge,
+                    auth: authData.auth,
+                    authPending: authData.authPending,
+                    authError: authData.authError,
+                    httpBase: statusData.httpBase || authData.httpBase,
+                    error: statusData.error || authData.error || null,
+                  })
+                } else {
+                  data = authData
+                }
+              }
+            } catch (err) {
+              firstError = firstError || err
+            }
           }
-          if (data && data.httpBase) player.adoptHttpBase(data.httpBase)
-          if (alive.current) setState({ loading: false, data, error: null })
+          if (!isLatest()) return
+          if (!data && statusData) data = statusData
+          if (!data) {
+            setState((prev) => ({
+              loading: false,
+              data: prev.data,
+              error: (firstError && firstError.message) || '连接失败',
+            }))
+            return
+          }
+          if (data.httpBase) player.adoptHttpBase(data.httpBase)
+          if (!isLatest()) return
+          setState((prev) => {
+            let next = data
+            const pending = data.authPending === true || data.auth === 'unverified'
+            /* unverified：网络暂时无法验登录态，保留上一份已验证账号，避免误显示扫码/登出 */
+            if (pending && prev.data && prev.data.authed && !data.authed) {
+              next = Object.assign({}, data, {
+                authed: true,
+                nickname: prev.data.nickname || data.nickname || null,
+                avatar: prev.data.avatar || data.avatar || null,
+                vipType: prev.data.vipType != null ? prev.data.vipType : (Number(data.vipType) || 0),
+                userId: prev.data.userId != null ? prev.data.userId : data.userId,
+                authPending: true,
+                auth: data.auth || 'unverified',
+              })
+            }
+            return { loading: false, data: next, error: null }
+          })
         } catch (err) {
-          if (alive.current) setState((prev) => ({ loading: false, data: prev.data, error: (err && err.message) || '连接失败' }))
+          if (!isLatest()) return
+          setState((prev) => ({ loading: false, data: prev.data, error: (err && err.message) || '连接失败' }))
         }
       }, [])
       React.useEffect(() => {
         alive.current = true
-        request()
-        const retry = setTimeout(() => { if (alive.current) request() }, 2500)
-        const timer = setInterval(request, 20000)
+        request().catch(() => {})
+        const retry = setTimeout(() => {
+          request().catch(() => {})
+        }, 2500)
+        const timer = setInterval(() => {
+          request().catch(() => {})
+        }, 20000)
         return () => {
           alive.current = false
           clearTimeout(retry)
@@ -2108,15 +2310,19 @@ window.__ModuleLoader__.load({
       return useSyncStore(subscribeNpMode, () => npMode)
     }
 
-    let authInfo = { authed: false, vip: false }
+    let authInfo = { authed: false, vip: false, userId: null }
     const authListeners = new Set()
 
     function setAuthInfo(next) {
-      const value = { authed: !!(next && next.authed), vip: !!(next && next.vip) }
-      if (authInfo.authed === value.authed && authInfo.vip === value.vip) return
-      const authedChanged = authInfo.authed !== value.authed
+      const value = {
+        authed: !!(next && next.authed),
+        vip: !!(next && next.vip),
+        userId: next && next.userId != null ? String(next.userId) : null,
+      }
+      if (authInfo.authed === value.authed && authInfo.vip === value.vip && String(authInfo.userId || '') === String(value.userId || '')) return
+      const identityChanged = authInfo.authed !== value.authed || String(authInfo.userId || '') !== String(value.userId || '')
       authInfo = value
-      if (authedChanged) resetLikeCache()
+      if (identityChanged) resetLikeCache()
       Array.from(authListeners).forEach((fn) => {
         try {
           fn()
@@ -2148,6 +2354,7 @@ window.__ModuleLoader__.load({
     let uiToastSink = null
     /* 服务端 /like/status 返回的登录态；false 时红心置灰、点击只提示登录，绝不发 POST */
     let likeServerAuthed = null
+    let likeEpoch = 0
 
     function setLikeToast(fn) {
       likeGlobalToast = fn || null
@@ -2177,6 +2384,7 @@ window.__ModuleLoader__.load({
     }
 
     function resetLikeCache() {
+      likeEpoch += 1
       likeCache.clear()
       likeCheckedAt.clear()
       likePending.clear()
@@ -2190,6 +2398,8 @@ window.__ModuleLoader__.load({
     }
 
     function ensureLikeStatus(ids) {
+      /* 未登录不查询状态：避免登出瞬间发起请求、也避免旧账号延迟响应回填 */
+      if (!authInfo.authed) return
       const list = Array.isArray(ids) ? ids : [ids]
       list.forEach((raw) => {
         const id = String(raw === undefined || raw === null ? '' : raw)
@@ -2207,10 +2417,15 @@ window.__ModuleLoader__.load({
       const ids = Array.from(likeQueue).slice(0, 50)
       ids.forEach((id) => likeQueue.delete(id))
       if (!ids.length) return
+      const epoch = likeEpoch
+      const requestStartedAt = Date.now()
       apiGet('/like/status?ids=' + ids.join(',')).then((data) => {
+        if (epoch !== likeEpoch) return
         likeServerAuthed = !!(data && data.authed)
         const liked = (data && data.liked) || {}
         ids.forEach((id) => {
+          /* 本地在请求发出后有更新（用户点击/新账号）则不回填旧状态 */
+          if ((likeCheckedAt.get(id) || 0) > requestStartedAt) return
           likeCache.set(id, liked[id] === true)
           likeCheckedAt.set(id, Date.now())
         })
@@ -2241,6 +2456,7 @@ window.__ModuleLoader__.load({
         return
       }
       if (likePending.has(id)) return
+      const epoch = likeEpoch
       const previous = likeCache.get(id) === true
       const next = !previous
       likeCache.set(id, next)
@@ -2248,12 +2464,15 @@ window.__ModuleLoader__.load({
       likePending.add(id)
       notifyLike(id)
       apiPost('/like', { id: Number(id) || id, like: next }).then((data) => {
+        if (epoch !== likeEpoch) return
         const value = data && typeof data.liked === 'boolean' ? data.liked : next
         likeCache.set(id, value)
       }).catch((err) => {
+        if (epoch !== likeEpoch) return
         likeCache.set(id, previous)
         pushLikeToast((err && err.message) || t('like.fail'))
       }).then(() => {
+        if (epoch !== likeEpoch) return
         likePending.delete(id)
         notifyLike(id)
       })
@@ -3198,6 +3417,7 @@ window.__ModuleLoader__.load({
     function Account(props) {
       const t = props.t
       const data = props.status && props.status.data
+      const authPending = !!(data && (data.authPending === true || data.auth === 'unverified'))
       if (data && data.authed) {
         const vip = data.vipType && Number(data.vipType) > 0
         return h('div', { className: 'nm-account' },
@@ -3206,6 +3426,7 @@ window.__ModuleLoader__.load({
               ? h('img', { className: 'nm-avatar', src: httpsUrl(data.avatar), alt: '' })
               : h('span', { className: 'nm-avatar nm-avatar-fb' }, initialOf(data.nickname)),
             h('span', { className: 'nm-account-name' }, data.nickname || t('action.login')),
+            authPending ? h('span', { className: 'nm-account-pending' }, t('status.authPending')) : null,
             vip ? h('span', { className: 'nm-badge vip' }, t('vip')) : null),
           h('button', {
             type: 'button',
@@ -3214,6 +3435,11 @@ window.__ModuleLoader__.load({
             'aria-label': t('action.logout'),
             onClick: props.onLogout,
           }, h(Icon, { name: 'logout', size: 15 })))
+      }
+      if (authPending) {
+        return h('div', { className: 'nm-account nm-account-restoring' },
+          h(Spinner, null),
+          h('span', null, t('status.authPending')))
       }
       return h('button', {
         type: 'button',
@@ -4553,6 +4779,7 @@ window.__ModuleLoader__.load({
       const debouncedQuery = useDebounced(String(query || '').trim(), 320)
       const status = useStatus()
       const authed = !!(status.data && status.data.authed)
+      const authPending = !!(status.data && (status.data.authPending === true || status.data.auth === 'unverified'))
       const home = useResource((signal) => apiGet('/home', signal), 'home:' + refresh + ':' + authVersion)
       const mine = useResource((signal) => apiGet('/playlists', signal), 'mine:' + refresh + ':' + authVersion, authed)
       const artists = useResource(
@@ -4575,7 +4802,14 @@ window.__ModuleLoader__.load({
       /* 把登录态同步给全局 store（dock / 播放页的音质菜单用） */
       React.useEffect(() => {
         const data = status.data || {}
-        setAuthInfo({ authed: !!data.authed, vip: !!(data.vipType && Number(data.vipType) > 0) })
+        const pending = data.authPending === true || data.auth === 'unverified'
+        /* unverified 时不要用 authed=false 覆盖上一份已验证账号 */
+        if (pending && !data.authed) return
+        setAuthInfo({
+          authed: !!data.authed,
+          vip: !!(data.vipType && Number(data.vipType) > 0),
+          userId: data.userId != null ? data.userId : null,
+        })
       }, [status.data])
 
       /* 引擎安装状态：跟随 /status 的 install 字段 */
@@ -4677,32 +4911,45 @@ window.__ModuleLoader__.load({
       const artistList = authed ? (favoriteArtists.length ? favoriteArtists : homeArtists) : homeArtists
       const minePlaylists = toArray(mine.data && mine.data.playlists)
 
-      const showLoginBanner = !!status.data && !authed && !detail
+      const showLoginBanner = !!status.data && !authed && !detail && !authPending
       const engineInfo = (status.data && status.data.engine) || ''
       const installInfo = (status.data && status.data.install) || {}
       const engineReady = engineInfo === 'installed' || !!installInfo.installed || install.state === 'done'
       const engineInstalling = !engineReady && (install.state === 'running' || engineInfo === 'installing' || installInfo.state === 'running')
-      const engineBroken = !engineReady && !engineInstalling && !!(status.data && (
-        status.data.bridge === 'error' || engineInfo === 'missing' || engineInfo === 'failed' ||
+      const bridgeError = !!(status.data && status.data.bridge === 'error')
+      const engineBroken = bridgeError || (!engineReady && !engineInstalling && !!(status.data && (
+        engineInfo === 'missing' || engineInfo === 'failed' ||
         installInfo.state === 'failed' || install.state === 'failed'
-      ))
+      )))
       const showBody = !!home.data || (!engineBroken && !engineInstalling)
 
       const openLogin = () => setLoginOpen(true)
 
       const handleAuthed = () => {
+        /* 账号可能变化：立刻使旧 like 缓存/在途请求失效 */
+        resetLikeCache()
         setAuthVersion((value) => value + 1)
         status.refresh()
         setToast(t('login.ok'))
       }
 
+      const logoutPendingRef = React.useRef(false)
       const handleLogout = () => {
-        apiPost('/logout').catch(() => {}).then(() => {
+        if (logoutPendingRef.current) return
+        logoutPendingRef.current = true
+        apiPost('/logout').then(() => {
+          /* 只有真正成功才更新登录态/清空视图；同时让旧账号的 like 在途响应失效 */
+          resetLikeCache()
           setAuthVersion((value) => value + 1)
           status.refresh()
           setStack([])
           setTab('recommend')
           setToast(t('toast.logoutDone'))
+        }).catch((err) => {
+          /* 失败保留当前账号与页面状态，只提示错误 */
+          setToast((err && err.message) || t('toast.logoutFailed'))
+        }).then(() => {
+          logoutPendingRef.current = false
         })
       }
 
@@ -5268,6 +5515,9 @@ window.__ModuleLoader__.load({
     .nm-search-clear:hover{background:var(--nm-fill2);color:var(--nm-t1)}
     .nm-refresh{margin-left:2px}
     .nm-account{display:flex;align-items:center;gap:6px;min-width:0}
+    .nm-account-pending{font-size:9.5px;color:var(--nm-t3);white-space:nowrap}
+    .nm-account-restoring{font-size:10.5px;color:var(--nm-t3);gap:6px}
+    .nm-account-restoring .nm-spinner{width:12px;height:12px}
     .nm-account-profile{display:flex;align-items:center;gap:7px;min-width:0;padding:2px 4px 2px 2px;border-radius:999px}
     .nm-avatar{width:26px;height:26px;border-radius:50%;object-fit:cover;flex:none;background:var(--nm-fill2)}
     .nm-avatar-fb{display:grid;place-items:center;font-size:12px;font-weight:700;color:var(--nm-on-accent);background:linear-gradient(140deg,var(--nm-accent),color-mix(in srgb,var(--nm-accent-2) 78%,var(--nm-accent)))}
@@ -6314,6 +6564,12 @@ window.__ModuleLoader__.load({
             }
             try {
               audio.remove()
+            } catch (err) {
+              /* ignore */
+            }
+            try {
+              const nodes = document.querySelectorAll('audio[data-nm-audio]')
+              for (let i = 0; i < nodes.length; i += 1) nodes[i].remove()
             } catch (err) {
               /* ignore */
             }

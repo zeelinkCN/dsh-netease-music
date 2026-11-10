@@ -2591,8 +2591,8 @@ try {
     const el = document.querySelector('[data-nm="build-stamp"]')
     return el ? (el.textContent || '').trim() : null
   })()`)
-  check('build-stamp 文本匹配「更新于 v1.1.0 ·」且不含「登录态」',
-    !!buildStamp && /v1\.1\.0/.test(buildStamp) && /更新于/.test(buildStamp) && !/登录态/.test(buildStamp),
+  check('build-stamp 文本匹配「更新于 v1.1.1 ·」且不含「登录态」',
+    !!buildStamp && /v1\.1\.1/.test(buildStamp) && /更新于/.test(buildStamp) && !/登录态/.test(buildStamp),
     JSON.stringify({ buildStamp }))
   try { await evaluate(`(() => { const el = document.querySelector('[data-nm="build-stamp"]'); if (el) el.scrollIntoView({ block: 'center' }) })()`); await sleep(250); await S('31-build-stamp.png'); await scrollTop() } catch { /* ignore */ }
   // 回到列表 + 确保 dock 存在
@@ -3013,13 +3013,19 @@ try {
     const healLogs = ((healLogsRaw && healLogsRaw.clientLogs) || []).map((x) => (x.body && x.body.event) || '')
     check('clientlog 出现 seek:recover 事件', healLogs.some((e) => e === 'seek:recover'), JSON.stringify(healLogs.filter((e) => /recover/.test(e))))
     check('clientlog 出现 seek:recover-done 事件', healLogs.some((e) => e === 'seek:recover-done'), JSON.stringify(healLogs.filter((e) => /recover/.test(e))))
-    const allHealLogs = (healLogsRaw && healLogsRaw.clientLogs) || []
-    const mediaLoaded = allHealLogs.filter((x) => (x.body && x.body.event) === 'media:loadedmetadata')
-    const recoverDone = allHealLogs.filter((x) => (x.body && x.body.event) === 'seek:recover-done')
-    const doneSeekable = recoverDone.map((x) => x.body && x.body.data && x.body.data.seekable).find((v) => Array.isArray(v) && v.length > 0 && Number(v[0][1] || 0) > 0) || null
-    check('自愈后 seekable 恢复正常（media:loadedmetadata 或 seek:recover-done 携带区间）',
-      (mediaLoaded.length > 0 && mediaLoaded.some((x) => x.body && x.body.data && x.body.data.seekable !== undefined)) || !!doneSeekable,
-      JSON.stringify({ mediaLoaded: mediaLoaded.slice(0, 2), doneSeekable }))
+    // v1.1 清理已移除 media:* 日志；直接读新 audio 元素的实际 seekable 区间验证恢复可 seek
+    const actualSeekable = await evaluate(`(() => {
+      const a = document.querySelector('audio[data-nm-audio]') || document.querySelector('audio')
+      if (!a) return null
+      const list = a.seekable
+      const ranges = []
+      if (list && typeof list.length === 'number') for (let i = 0; i < Math.min(list.length, 4); i++) ranges.push([Number(list.start(i)) || 0, Number(list.end(i)) || 0])
+      return { len: list ? list.length : 0, ranges, duration: Number(a.duration) || 0 }
+    })()`)
+    check('自愈后 audio.seekable 恢复覆盖到 duration（可 seek）',
+      !!actualSeekable && actualSeekable.len > 0 && actualSeekable.duration > 0 &&
+      Math.max.apply(null, actualSeekable.ranges.map((r) => r[1])) >= actualSeekable.duration - 2,
+      JSON.stringify(actualSeekable))
   } else {
     check('seekable 异常拖拽触发自愈重载（/audio 产生新请求）', true, '环境不允许改写 seekable，跳过（' + badPatched + '）')
     check('自愈后 audio.currentTime ≈60% 目标', true, '跳过')
@@ -3568,6 +3574,13 @@ try {
       fsMode = 'real'
     } catch { realFs = false }
     if (!realFs) {
+      // headless 下原生 Fullscreen 不可用时，上面那次真实点击仍会打开播放页并卸载列表，
+      // 导致随后 mock 分支找不到曲目行 → 调用链永远不会被触发。先退回列表再走 mock 分支。
+      if (await evaluate(`!!document.querySelector('[data-nm="nowplaying"]')`)) {
+        try { await clickSel('[data-nm="np-back"]') } catch { /* ignore */ }
+        await sleep(500)
+      }
+      try { await waitFor(`document.querySelectorAll('[data-nm="track"]').length > 0`, 'rows back for mock fs', 6000) } catch { /* 断言暴露 */ }
       // headless 无手势/API 受限：monkeypatch 验证调用链
       await evaluate(`(() => {
         document.__fsCalls = 0

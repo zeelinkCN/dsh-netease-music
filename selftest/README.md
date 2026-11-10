@@ -50,7 +50,7 @@ cd netease-panel-selftest
   - `bridge:'error'` → `/status` 报 `bridge:'error'`，数据接口 503 `code:'BRIDGE'`（验证「引擎缺失」不白屏）。
   - `errorMode:'home'` → 数据接口 500 `code:'NETWORK'`（验证错误态 + 重试原地恢复）。
 
-## 断言覆盖（432 项，v1–v1.1.0）
+## 断言覆盖（432 项，v1–v1.1.1）
 
 1. 模块：client.js 加载、`__ModuleLoader__.load`、3 个 slot 注册及 spec（`main.key`、`sidebar.panellist.id/order=30`、`shell.overlay.id`）、`<audio data-nm-audio>` 创建、无曲目时播放条不渲染。
    侧栏图标：`<img>`、`src` 为 `data:image/png;base64,`（官方红标）、`naturalWidth>0`、渲染尺寸 = 传入 size(20)，深/浅色各一张 4x 放大截图。
@@ -84,7 +84,7 @@ cd netease-panel-selftest
 22. v1.1 列表点歌只播放：点曲目行/`track-play`/播放全部不自动开 NP，dock 出现、tab/列表不变；点第二首仍切歌并停留列表；`dock-expand` 文案「打开播放页」、显式点击才进 NP（非全屏）；`row-fullscreen` 文案「全屏播放」。
 23. v1.1 原生全屏：`row-fullscreen` 真实鼠标手势触发 requestFullscreen，全屏 root 宽高=视口、dock 可见、全页 progress 1 条；全屏中 Esc 不关 NP；`np-fullscreen` 退出/再进入且文案切换；**全屏中点 `np-back` 会 exitFullscreen + 关闭 NP + 回列表且播放不中断**；`.nm-np:fullscreen` CSS 存在。
 24. v1.1 播放模式：dock 与 NP 各有 1 个 `play-mode`；列表→顺序→单曲→随机→列表循环、title/localStorage/toast 正确；单曲循环 ended 重播同一首；列表循环最后一首 ended 回第一首；顺序播放最后一首 ended 停止；随机 ended 切其它歌。
-25. v1.1 清理：build-stamp 匹配「更新于 v1.1.0 ·」且无「登录态」；clientlog 无 probe:audio*/media:*/audio:created/audio:bind/status:auth/status:error；seek:recover* 仍保留；普通日志 ≤20/min。
+25. v1.1 清理：build-stamp 匹配「更新于 v1.1.1 ·」且无「登录态」；clientlog 无 probe:audio*/media:*/audio:created/audio:bind/status:auth/status:error；seek:recover* 仍保留；普通日志 ≤20/min。
 26. 运行期：无 `console.error`、无未捕获页面异常；重新播放后播放条恢复。
 
 ## 截图

@@ -6,7 +6,7 @@
 
 仓库：<https://github.com/zeelinkCN/dsh-netease-music>
 
-![version](https://img.shields.io/badge/version-1.1.0-ec4141) ![UI](https://img.shields.io/badge/UI-Apple%20Music%20style-111) ![login](https://img.shields.io/badge/%E7%99%BB%E5%BD%95-%E6%89%AB%E7%A0%81-C20C0C) ![license](https://img.shields.io/badge/license-MIT-blue)
+![version](https://img.shields.io/badge/version-1.1.1-ec4141) ![UI](https://img.shields.io/badge/UI-Apple%20Music%20style-111) ![login](https://img.shields.io/badge/%E7%99%BB%E5%BD%95-%E6%89%AB%E7%A0%81-C20C0C) ![license](https://img.shields.io/badge/license-MIT-blue)
 
 ## 功能
 

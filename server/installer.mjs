@@ -85,6 +85,7 @@ export function createInstaller(options) {
   }
 
   let running = null
+  let installVerified = null
 
   const push = (line) => {
     const text = String(line).replace(/\u001b\[[0-9;]*m/g, '').replace(/\s+$/, '')
@@ -106,7 +107,29 @@ export function createInstaller(options) {
     }
   }
 
-  const isInstalled = () => existsSync(pythonPath) && existsSync(join(repoDir, 'pyproject.toml'))
+  const hasInstallLayout = () => existsSync(pythonPath) && existsSync(join(repoDir, 'pyproject.toml'))
+
+  // 文件存在只代表 clone/venv 做过；依赖安装中断时不能误判为可用。
+  // 同一轮生命周期只同步探测一次，失败后的显式重试会重新探测并继续 pip。
+  const isInstalled = () => {
+    if (!hasInstallLayout()) {
+      installVerified = null
+      return false
+    }
+    if (installVerified !== null) return installVerified
+    const probe = spawnSync(
+      pythonPath,
+      ['-c', 'import pyncm, qrcode'],
+      {
+        cwd: repoDir,
+        env: { ...process.env, PYTHONUNBUFFERED: '1' },
+        encoding: 'utf8',
+        timeout: 15_000,
+      },
+    )
+    installVerified = probe.status === 0
+    return installVerified
+  }
 
   const snapshot = () => ({
     state: state.state,
@@ -149,6 +172,7 @@ export function createInstaller(options) {
   }
 
   async function execute() {
+    installVerified = false
     state.state = 'running'
     state.error = null
     state.lines = []
@@ -218,6 +242,7 @@ export function createInstaller(options) {
     state.phase = 'verify'
     push('校验引擎依赖…')
     await run(pythonPath, ['-c', 'import pyncm, qrcode; print("pyncm", getattr(pyncm, "__version__", "?"))'], repoDir, 'import pyncm')
+    installVerified = true
 
     state.phase = 'done'
     state.state = 'done'
@@ -228,6 +253,7 @@ export function createInstaller(options) {
 
   function start() {
     if (running) return running
+    if (state.state === 'failed') installVerified = null
     if (isInstalled()) {
       state.state = 'done'
       state.installed = true

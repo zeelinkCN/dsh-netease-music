@@ -44,6 +44,17 @@ const cfg = {
   likeAuthed: true,   // false：/like/status 返回 authed:false（未登录）
   likeError: null,    // true：like 接口返回 500
   playerCommand: null, // 注入一条 player/commands 命令（playQueue/control/refreshLike…）
+  statusError: null,  // null | 'http' | 'bridge-data'：/status 异常（测试 useStatus fallback）
+  authError: false,   // true：/auth 500
+  logoutError: false, // true：/logout 500（客户端不得本地登出）
+  likeDelayMs: 0,     // >0：/like/status 延迟响应（测试换账号 pending 回写）
+  likeForceLiked: null, // true：/like/status 所有 id 返回 liked:true（测试旧响应污染）
+  authPending: false,  // true：/auth 返回 authPending:true（登录态恢复中）
+  statusDelayMs: 0,    // >0：/status 延迟响应（快照取请求开始时）
+  statusSequence: null, // e.g. ['normal','pending']：/status 依次消费（pending=恢复中数据）
+  statusPendingOnce: false, // true：下一次 /status 返回 authPending/unverified（用后置 false）
+  statusPendingUntil: 0,   // >now：窗口内所有 /status 返回 authPending/unverified
+  statusPlan: null,        // [{delay,nickname,userId,authed}]：按请求顺序消费，延迟响应快照
   engine: 'installed',   // installed | missing | installing | failed
   installError: false,
   install: { state: 'idle', phase: 'idle', lines: [], error: null, installed: true, startedAt: 0 },
@@ -549,8 +560,107 @@ async function handleApi(req, res, path, searchParams) {
   }
 
   switch (path) {
-    case '/status':
-      return ok(res, apiStatus())
+    case '/status': {
+      if (cfg.statusError === 'http') return fail(res, 'NETWORK', 'status 读取失败（mock）', 500)
+      let statusSnapshot = apiStatus()
+      if (cfg.statusPendingUntil && Date.now() < cfg.statusPendingUntil) {
+        statusSnapshot = Object.assign({}, statusSnapshot, {
+          authed: false, auth: 'unverified', authPending: true,
+          nickname: null, avatar: null, userId: null, vipType: 0, level: 0,
+        })
+      }
+      let planDelay = 0
+      if (Array.isArray(cfg.statusPlan) && cfg.statusPlan.length) {
+        const plan = cfg.statusPlan.shift() || {}
+        if (plan.delay) planDelay = Number(plan.delay) || 0
+        if (plan.nickname !== undefined || plan.userId !== undefined || plan.authed !== undefined) {
+          statusSnapshot = Object.assign({}, statusSnapshot, {
+            authed: plan.authed === undefined ? statusSnapshot.authed : !!plan.authed,
+            nickname: plan.nickname === undefined ? statusSnapshot.nickname : plan.nickname,
+            userId: plan.userId === undefined ? statusSnapshot.userId : plan.userId,
+          })
+        }
+      }
+      if (planDelay > 0) await sleep(planDelay)
+      if (cfg.statusPendingOnce) {
+        cfg.statusPendingOnce = false
+    cfg.statusPendingUntil = 0
+    cfg.statusPlan = null
+        statusSnapshot = Object.assign({}, statusSnapshot, {
+          authed: false,
+          auth: 'unverified',
+          authPending: true,
+          nickname: null,
+          avatar: null,
+          userId: null,
+          vipType: 0,
+          level: 0,
+        })
+      }
+      if (Array.isArray(cfg.statusSequence) && cfg.statusSequence.length) {
+        const mode = cfg.statusSequence.shift()
+        if (mode === 'pending') {
+          statusSnapshot = Object.assign({}, statusSnapshot, {
+            authed: false,
+            auth: 'unverified',
+            authPending: true,
+            nickname: null,
+            avatar: null,
+            userId: null,
+            vipType: 0,
+            level: 0,
+          })
+        }
+      }
+      if (cfg.statusDelayMs > 0) await sleep(cfg.statusDelayMs)
+      if (cfg.statusError === 'bridge-error') {
+        return ok(res, {
+          bridge: 'error',
+          engine: 'missing',
+          install: installSummary(),
+          authed: false,
+          anonymous: true,
+          nickname: null,
+          avatar: null,
+          userId: null,
+          vipType: 0,
+          level: 0,
+          error: '数据引擎未就绪（mock bridge:error + 未验证登录态）',
+        })
+      }
+      if (cfg.statusError === 'bridge-data') {
+        return ok(res, {
+          bridge: 'error',
+          engine: 'installed',
+          install: installSummary(),
+          authed: cfg.authed,
+          anonymous: !cfg.authed,
+          nickname: cfg.authed ? cfg.nickname : null,
+          avatar: cfg.authed ? cfg.avatar : null,
+          userId: cfg.authed ? cfg.userId : null,
+          vipType: cfg.authed ? cfg.vipType : 0,
+          level: cfg.authed ? cfg.level : 0,
+          error: '数据引擎未就绪（mock bridge:error）',
+        })
+      }
+      return ok(res, statusSnapshot)
+    }
+
+    case '/auth': {
+      if (cfg.authError) return fail(res, 'NETWORK', 'auth 读取失败（mock）', 500)
+      return ok(res, {
+        authed: cfg.authed,
+        nickname: cfg.authed ? cfg.nickname : null,
+        avatar: cfg.authed ? cfg.avatar : null,
+        userId: cfg.authed ? cfg.userId : null,
+        vipType: cfg.authed ? cfg.vipType : 0,
+        level: cfg.authed ? cfg.level : 0,
+        engine: cfg.engine,
+        bridge: cfg.bridge,
+        authPending: !!cfg.authPending,
+        error: cfg.authPending ? '登录态恢复中（mock）' : null,
+      })
+    }
 
     case '/home':
       return ok(res, {
@@ -705,7 +815,12 @@ async function handleApi(req, res, path, searchParams) {
 
     case '/like/status': {
       if (cfg.likeError) return fail(res, 'NETWORK', '收藏状态加载失败（mock）', 500)
-      return ok(res, likeStatus(searchParams.get('ids')))
+      if (cfg.likeDelayMs > 0) await sleep(cfg.likeDelayMs)
+      const status = likeStatus(searchParams.get('ids'))
+      if (cfg.likeForceLiked === true) {
+        for (const key of Object.keys(status.liked)) status.liked[key] = true
+      }
+      return ok(res, status)
     }
 
     case '/like': {
@@ -741,6 +856,7 @@ async function handleApi(req, res, path, searchParams) {
 
     case '/logout':
       if (req.method !== 'POST') return fail(res, 'INTERNAL', 'method not allowed', 405)
+      if (cfg.logoutError) return fail(res, 'NETWORK', '退出登录失败（mock）', 500)
       cfg.authed = false
       loginCheckCount = 0
       return ok(res, { authed: false })
@@ -784,6 +900,15 @@ const server = createServer(async (req, res) => {
         pushPlayerCommand(patch.playerCommand)
         cfg.playerCommand = null
       }
+      if (patch.resetLikes) {
+        likedState.clear()
+        for (const t of tracks) if (Number(t.id) % 2 === 0) likedState.set(String(t.id), true)
+      }
+      if ('statusPendingForMs' in patch) {
+        const ms = Number(patch.statusPendingForMs) || 0
+        cfg.statusPendingUntil = ms > 0 ? Date.now() + ms : 0
+        cfg.statusPendingForMs = null
+      }
       if (patch.clearLogs) {
         clientLogs = []
         commandPosts = []
@@ -821,6 +946,15 @@ const server = createServer(async (req, res) => {
     cfg.modeHangMs = 0
     cfg.likeAuthed = true
     cfg.likeError = null
+    cfg.statusError = null
+    cfg.authError = false
+    cfg.logoutError = false
+    cfg.likeDelayMs = 0
+    cfg.likeForceLiked = null
+    cfg.authPending = false
+    cfg.statusDelayMs = 0
+    cfg.statusSequence = null
+    cfg.statusPendingOnce = false
     likedState.clear()
     for (const t of tracks) if (Number(t.id) % 2 === 0) likedState.set(String(t.id), true)
     playerSeq = 0

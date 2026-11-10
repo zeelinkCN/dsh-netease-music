@@ -67,6 +67,18 @@ MIRROR_COOKIE_FILE = os.path.join(
     "cookies.json",
 )
 REQUEST_TIMEOUT = (6, 15)  # (connect, read)；避免异常网络把 Host 卡死
+AUTH_CHECK_TIMEOUT = (3, 8)  # 登录态校验用更短超时，避免拖死 status
+AUTH_ANON_TIMEOUT = (2, 5)  # 匿名登录/远端登出这类轻请求的短超时（最坏 ~7s）
+AUTH_RETRY_BASE_SECONDS = 2.0  # 网络失败后的重试间隔（指数退避，不阻塞每次 status）
+AUTH_RETRY_MAX_SECONDS = 30.0
+AUTH_RETRY_MIN_INTERVAL = 2.0  # 数据命令强制重试的最小间隔（防抖）
+AUTH_VALID = "valid"
+AUTH_INVALID = "invalid"
+AUTH_TRANSPORT = "transport"
+AUTH_UNVERIFIED = "unverified"
+AUTH_ANONYMOUS = "anonymous"
+AUTH_LOGGED_OUT = "logged_out"
+AUTH_OFFLINE = "offline"
 MAX_PLAYLIST_TRACKS = 500
 
 LEVELS = {
@@ -123,11 +135,18 @@ class BridgeError(Exception):
 
 
 class _TimeoutSession(pyncm.Session):
-    """把 requests 的默认超时补上，避免网易云接口挂起时卡死 Host。"""
+    """把 requests 的默认超时补上，避免网易云接口挂起时卡死 Host。
+
+    request_timeout 可按实例覆盖（登录态校验会用 AUTH_CHECK_TIMEOUT 的短超时）。
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.request_timeout = REQUEST_TIMEOUT
 
     def request(self, method, url, *args, **kwargs):
         if kwargs.get("timeout") is None:
-            kwargs["timeout"] = REQUEST_TIMEOUT
+            kwargs["timeout"] = getattr(self, "request_timeout", REQUEST_TIMEOUT) or REQUEST_TIMEOUT
         return super().request(method, url, *args, **kwargs)
 
 
@@ -473,6 +492,20 @@ class Engine:
         self.login_key_at = None
         self._heart_playlist_id = None  # 心动模式需要「自己的歌单」作为上下文，缓存一次
 
+        # ---- 登录态状态机（区分「网络不可达」与「凭据真失效」） ----
+        self._credentials_loaded = False  # 是否从 cookie 文件成功读到登录态
+        self._has_user_credentials = False  # 读到的凭据里是否有真实账号 cookie（MUSIC_U）
+        self._auth_state = AUTH_ANONYMOUS
+        self._auth_error = None
+        self._last_validation_error = None
+        self._auth_retry_delay = AUTH_RETRY_BASE_SECONDS
+        self._auth_next_retry_at = 0.0
+        self._auth_last_attempt_at = 0.0
+        self._auth_attempts = 0
+        self._anon_retry_delay = AUTH_RETRY_BASE_SECONDS
+        self._anon_next_retry_at = 0.0
+        self._logged_out = False  # 用户主动登出后，禁止自动恢复旧账号
+
     # ---------------- 会话 / 登录态 ---------------- #
     def _new_session(self):
         session = _TimeoutSession()
@@ -521,30 +554,195 @@ class Engine:
             return False
         # 旧登录信息不可信，重新校验
         session.login_info = {"success": False, "tick": time.time(), "content": None}
-        log("已载入 cookie 文件：%s" % path)
+        cookie_names = set()
+        try:
+            cookie_names = set(session.cookies.get_dict().keys())
+        except Exception as exc:
+            log("读取已载入 cookie 名称失败：%s" % exc)
+        self._credentials_loaded = True
+        self._has_user_credentials = "MUSIC_U" in cookie_names
+        log(
+            "已载入 cookie 文件：%s（%s）"
+            % (path, "含用户凭据" if self._has_user_credentials else "无用户凭据")
+        )
         return True
 
     def _validate_session(self):
-        """用 GetCurrentLoginStatus 校验当前 cookie 是否还是有效账号。"""
+        """三态校验登录态：AUTH_VALID / AUTH_INVALID / AUTH_TRANSPORT。
+
+        只有服务端**明确**回答「未登录 / 账号资料为空 / 匿名用户」时才判定 invalid；
+        网络异常、超时、5xx、非 JSON 响应都只算 transport —— 绝不因此丢弃本地凭据。
+        """
+        session = self.session()
+        previous_timeout = getattr(session, "request_timeout", REQUEST_TIMEOUT)
+        session.request_timeout = AUTH_CHECK_TIMEOUT
         try:
-            resp = apis.login.GetCurrentLoginStatus()
-        except Exception as exc:
-            log("登录态校验失败（网络）：%s" % exc)
-            return False
-        if not isinstance(resp, dict) or _int(resp.get("code")) != 200:
-            return False
+            try:
+                resp = apis.login.GetCurrentLoginStatus()
+            except requests.exceptions.RequestException as exc:
+                self._last_validation_error = "网络异常：%s" % _describe_exception(exc)
+                log("登录态校验失败（网络，保留凭据）：%s" % exc)
+                return AUTH_TRANSPORT
+            except (ConnectionError, TimeoutError, OSError) as exc:
+                self._last_validation_error = "网络异常：%s" % _describe_exception(exc)
+                log("登录态校验失败（网络，保留凭据）：%s" % exc)
+                return AUTH_TRANSPORT
+            except Exception as exc:
+                # 不认识的异常一律不当作凭据失效（宁可稍后重试）
+                self._last_validation_error = "校验异常：%s: %s" % (type(exc).__name__, exc)
+                log("登录态校验异常（按网络异常处理，保留凭据）：%s" % exc)
+                return AUTH_TRANSPORT
+        finally:
+            session.request_timeout = previous_timeout or REQUEST_TIMEOUT
+
+        if not isinstance(resp, dict):
+            self._last_validation_error = "登录态校验返回了非 JSON 响应"
+            log("登录态校验返回非 JSON（按网络异常处理，保留凭据）")
+            return AUTH_TRANSPORT
+        code = _int(resp.get("code"))
+        if code != 200:
+            # 只有 301/302（服务端明确「需要登录」）才算凭据失效；
+            # 429 风控/限流、其它 4xx、0/未知码都无法确认凭据失效 → 保留凭据按 transport 重试。
+            if code in (301, 302):
+                self._last_validation_error = "登录态已失效（code=%s）" % code
+                log("登录态已失效（服务端明确需要登录，code=%s）" % code)
+                return AUTH_INVALID
+            self._last_validation_error = "登录态校验接口异常（code=%s）" % code
+            log("登录态校验返回非预期 code=%s（按网络异常处理，保留凭据）" % code)
+            return AUTH_TRANSPORT
         profile = resp.get("profile")
         account = resp.get("account") or {}
         if not isinstance(profile, dict) or not profile:
-            return False
-        if account.get("anonimousUser"):
-            return False
+            self._last_validation_error = "登录态已失效（账号资料为空）"
+            return AUTH_INVALID
+        if isinstance(account, dict) and account.get("anonimousUser"):
+            self._last_validation_error = "当前是匿名登录，不是用户账号"
+            return AUTH_INVALID
         try:
             apis.login.WriteLoginInfo(resp)
         except Exception as exc:
-            log("登录态写入失败：%s" % exc)
+            # 写不进去通常是响应结构异常，按“无法确认”处理，保留凭据等下次重试
+            self._last_validation_error = "登录态写入失败：%s" % exc
+            log("登录态写入失败（按网络异常处理，保留凭据）：%s" % exc)
+            return AUTH_TRANSPORT
+        self._last_validation_error = None
+        return AUTH_VALID
+
+    # ---- 退避与恢复 ----
+    def _reset_auth_backoff(self):
+        self._auth_retry_delay = AUTH_RETRY_BASE_SECONDS
+        self._auth_next_retry_at = 0.0
+        self._auth_attempts = 0
+
+    def _schedule_auth_retry(self, initial=False):
+        """安排下一次网络重试；initial=True 用于启动失败后的首次快速重试。"""
+        delay = 1.0 if initial else self._auth_retry_delay
+        self._auth_attempts += 1
+        now = time.time()
+        self._auth_next_retry_at = now + delay
+        self._auth_retry_delay = min(
+            max(delay * 2, AUTH_RETRY_BASE_SECONDS), AUTH_RETRY_MAX_SECONDS
+        )
+        return delay
+
+    def _reset_anon_backoff(self):
+        self._anon_retry_delay = AUTH_RETRY_BASE_SECONDS
+        self._anon_next_retry_at = 0.0
+
+    def _schedule_anon_retry(self):
+        delay = self._anon_retry_delay
+        self._anon_next_retry_at = time.time() + delay
+        self._anon_retry_delay = min(
+            delay * 2, AUTH_RETRY_MAX_SECONDS
+        )
+        return delay
+
+    def _try_anonymous(self, force=False):
+        """（受退避控制的）匿名登录；不会触碰用户 cookie 文件。
+
+        匿名登录是轻量请求，统一用 AUTH_ANON_TIMEOUT 短超时，避免网络异常时
+        status / 数据命令承受默认 REQUEST_TIMEOUT（最坏 ~21s）的阻塞。
+        """
+        if not force and time.time() < self._anon_next_retry_at:
             return False
-        return True
+        session = self.session()
+        previous_timeout = getattr(session, "request_timeout", REQUEST_TIMEOUT)
+        session.request_timeout = AUTH_ANON_TIMEOUT
+        try:
+            ok = self._anonymous_login()
+        finally:
+            session.request_timeout = previous_timeout or REQUEST_TIMEOUT
+        if ok:
+            self._auth_state = AUTH_ANONYMOUS
+            self._auth_error = None
+            self._reset_anon_backoff()
+            return True
+        self._auth_error = "匿名登录失败（网络异常）"
+        if self._auth_state not in (AUTH_LOGGED_OUT, AUTH_INVALID):
+            self._auth_state = AUTH_OFFLINE
+        delay = self._schedule_anon_retry()
+        log("匿名登录失败，%.0fs 后重试" % delay)
+        return False
+
+    def _restore_auth(self, force=False):
+        """把会话恢复到可用状态并返回状态机取值。
+
+        - 已有可用会话：直接返回；
+        - 持有用户凭据但未验证：按退避/force 规则重新校验（valid 恢复账号；invalid 转匿名；
+          transport 保留凭据并按指数退避安排下次重试）；
+        - 无凭据或已主动登出：受退避控制地匿名登录。
+        """
+        session = self.session()
+        if session.logged_in:
+            if not session.is_anonymous:
+                self._auth_state = AUTH_VALID
+            elif self._auth_state not in (AUTH_LOGGED_OUT, AUTH_INVALID):
+                self._auth_state = AUTH_ANONYMOUS
+            return self._auth_state
+
+        if self._has_user_credentials and not self._logged_out:
+            now = time.time()
+            if force:
+                # 命令需要网络了：允许无视退避，但 2s 内不重复打校验接口
+                if now - self._auth_last_attempt_at < AUTH_RETRY_MIN_INTERVAL:
+                    return self._auth_state
+            elif now < self._auth_next_retry_at:
+                # status 轮询：尊重退避，不做网络请求，保证 status 不卡
+                return self._auth_state
+            self._auth_last_attempt_at = now
+            result = self._validate_session()
+            if result == AUTH_VALID:
+                self._auth_state = AUTH_VALID
+                self._auth_error = None
+                self._reset_auth_backoff()
+                snap = self.snapshot()
+                log(
+                    "登录态已恢复：%s（uid=%s）"
+                    % (snap.get("nickname"), snap.get("userId"))
+                )
+                return AUTH_VALID
+            if result == AUTH_INVALID:
+                self._auth_state = AUTH_INVALID
+                self._has_user_credentials = False
+                self._auth_error = self._last_validation_error or "登录态已失效"
+                log("登录态已失效（服务端明确判定）：%s；转匿名" % self._auth_error)
+                self._try_anonymous(force=True)
+                return self._auth_state
+            # AUTH_TRANSPORT：保留凭据，退避后重试
+            self._auth_state = AUTH_UNVERIFIED
+            self._auth_error = (
+                self._last_validation_error or "网络异常，暂时无法验证登录态"
+            )
+            delay = self._schedule_auth_retry()
+            log(
+                "登录态校验网络异常（第 %d 次）：%s；凭据已保留，%.0fs 后重试"
+                % (self._auth_attempts, self._auth_error, delay)
+            )
+            return AUTH_UNVERIFIED
+
+        # 没有用户凭据（或用户已主动登出）→ 匿名登录
+        self._try_anonymous(force=force)
+        return self._auth_state
 
     def _anonymous_login(self):
         try:
@@ -621,15 +819,22 @@ class Engine:
         return applied
 
     def ensure_session(self):
-        """保证有可用的（匿名或真实）会话，供只读接口使用。"""
+        """保证有可用会话：优先恢复真实账号（保留凭据），再退回匿名。"""
         session = self.session()
         if session.logged_in:
             return session
-        if not self._anonymous_login():
+        state = self._restore_auth(force=True)
+        session = self.session()
+        if session.logged_in:
+            return session
+        if state == AUTH_UNVERIFIED:
             raise BridgeError(
-                "无法连接网易云音乐（匿名登录失败），请检查网络或代理设置", "NETWORK"
+                "网络异常，暂时无法验证登录态；登录凭据已保留，恢复后会自动重试",
+                "NETWORK",
             )
-        return self.session()
+        raise BridgeError(
+            "无法连接网易云音乐（匿名登录失败），请检查网络或代理设置", "NETWORK"
+        )
 
     def is_authed(self):
         session = self.session()
@@ -660,6 +865,10 @@ class Engine:
             "userId": _int(uid),
             "vipType": vip_type,
             "level": level,
+            # 登录态恢复信息（Host/UI 可选用；不影响既有字段）
+            "auth": self._auth_state,
+            "authPending": self._auth_state == AUTH_UNVERIFIED,
+            "authError": self._auth_error,
         }
 
     # ---------------- cookie 持久化 ---------------- #
@@ -720,13 +929,30 @@ class Engine:
             log("镜像 cookie 失败（不影响本插件）：%s" % exc)
 
     def clear_cookies(self):
+        """删除本地登录凭据（主 cookie 文件 + MCP 镜像）。
+
+        返回 (deleted_paths, errors)；删除失败不再静默吞掉，由 cmd_logout 决定
+        是否算登出成功，避免 PermissionError 时误报成功。
+        """
+        deleted = []
+        errors = []
         for path in (self.cookie_file, MIRROR_COOKIE_FILE):
+            if not path:
+                continue
             try:
                 if os.path.exists(path):
                     os.remove(path)
+                    deleted.append(path)
                     log("已删除登录态文件：%s" % path)
-            except Exception as exc:
-                log("删除登录态文件失败（%s）：%s" % (path, exc))
+            except OSError as exc:
+                message = "%s：%s" % (path, exc)
+                errors.append(message)
+                log("删除登录态文件失败：%s" % message)
+            except Exception as exc:  # 防御非 OSError（例如异常路径类型）
+                message = "%s：%s: %s" % (path, type(exc).__name__, exc)
+                errors.append(message)
+                log("删除登录态文件失败：%s" % message)
+        return deleted, errors
 
     # ---------------- 数据读取 ---------------- #
     def _daily_tracks(self):
@@ -793,6 +1019,12 @@ class Engine:
         return {"pong": True}
 
     def cmd_status(self, _params):
+        # 受退避控制的恢复尝试：网络恢复后的第一次到期 status 就能把账号恢复回来，
+        # 退避期内则完全不做网络请求，保证 status 始终快速返回。
+        try:
+            self._restore_auth(force=False)
+        except Exception as exc:  # status 永不因恢复逻辑异常而失败
+            log("status 恢复登录态异常（已忽略，保留当前状态）：%s" % exc)
         return self.snapshot()
 
     def cmd_login_start(self, _params):
@@ -889,6 +1121,15 @@ class Engine:
             self.login_key = None
             self.login_key_at = None
             self._heart_playlist_id = None
+            # 重新登录成功：解除「已主动登出」封印并标记凭据有效
+            self._logged_out = False
+            self._credentials_loaded = True
+            self._has_user_credentials = True
+            self._auth_state = AUTH_VALID
+            self._auth_error = None
+            self._last_validation_error = None
+            self._reset_auth_backoff()
+            self._reset_anon_backoff()
             self.save_cookies()
             snap = self.snapshot()
             log("扫码登录成功：%s（uid=%s）" % (snap.get("nickname"), snap.get("userId")))
@@ -908,17 +1149,52 @@ class Engine:
         }
 
     def cmd_logout(self, _params):
-        try:
-            apis.login.LoginLogout()
-        except Exception as exc:
-            log("登出接口调用失败（忽略）：%s" % exc)
+        # 先落「已主动登出」标志：即使后续清理/匿名登录失败，也绝不再自动恢复旧账号
+        self._logged_out = True
+        self._auth_state = AUTH_LOGGED_OUT
+        self._auth_error = None
+        self._last_validation_error = None
+        self._has_user_credentials = False
+        self._reset_auth_backoff()
         self.login_key = None
         self.login_key_at = None
         self._heart_playlist_id = None
-        self.clear_cookies()
+
+        server_logout_ok = True
+        server_logout_error = None
+        session = self.session()
+        previous_timeout = getattr(session, "request_timeout", REQUEST_TIMEOUT)
+        session.request_timeout = AUTH_ANON_TIMEOUT
+        try:
+            apis.login.LoginLogout()
+        except Exception as exc:
+            server_logout_ok = False
+            server_logout_error = _describe_exception(exc)
+            log("远端登出接口失败/超时（本地仍继续清理凭据）：%s" % exc)
+        finally:
+            session.request_timeout = previous_timeout or REQUEST_TIMEOUT
+
+        deleted, errors = self.clear_cookies()
+        # 不管文件是否删干净，内存会话立即换新，旧账号在本进程内不再可用
         self._new_session()
-        self._anonymous_login()
-        return {"ok": True}
+
+        if errors:
+            log("登出未完成：本地凭据删除失败：%s" % "；".join(errors))
+            raise BridgeError(
+                "退出登录失败：无法删除本地登录凭据（%s），请检查文件权限后重试"
+                % "；".join(errors),
+                "INTERNAL",
+            )
+
+        if not self._try_anonymous(force=True):
+            log("登出后匿名登录失败（网络异常），后续命令/status 会继续重试")
+        log("已退出登录（删除 %d 个凭据文件）" % len(deleted))
+        return {
+            "ok": True,
+            "deleted": deleted,
+            "serverLogout": server_logout_ok,
+            "serverLogoutError": server_logout_error,
+        }
 
     def cmd_home(self, _params):
         """今日推荐 + 推荐歌单 + 我的歌单 + 收藏歌手；单块失败不影响其他块。"""
@@ -1766,14 +2042,46 @@ def _to_bridge_error(exc, prefix):
 # 启动 & 主循环
 # --------------------------------------------------------------------------- #
 def bootstrap(engine):
-    """加载 cookie → 校验 → 无效则匿名登录。返回 ready 数据。"""
+    """加载 cookie → 三态校验 → 决定「恢复账号 / 保留待重试 / 转匿名」。
+
+    关键修复：启动时校验如果只是网络异常，不再判定凭据失效、不再匿名登录覆盖会话，
+    而是保留凭据并安排退避重试（cmd_status 到期后会自动恢复账号）。
+    """
     loaded = engine._load_cookie_file()
-    valid = loaded and engine._validate_session()
-    if not valid:
-        engine._anonymous_login()
+    if loaded and engine._has_user_credentials:
+        result = engine._validate_session()
+        if result == AUTH_VALID:
+            engine._auth_state = AUTH_VALID
+            engine._auth_error = None
+            engine._reset_auth_backoff()
+            log("已用本地凭据恢复登录态")
+        elif result == AUTH_INVALID:
+            engine._auth_state = AUTH_INVALID
+            engine._has_user_credentials = False
+            engine._auth_error = engine._last_validation_error
+            log(
+                "本地 cookie 已失效（服务端明确判定）：%s；转匿名（文件保留，登录成功后会覆盖）"
+                % engine._auth_error
+            )
+            engine._try_anonymous(force=True)
+        else:
+            # 网络异常：保留凭据与 cookie 文件，绝不再匿名登录覆盖会话
+            engine._auth_state = AUTH_UNVERIFIED
+            engine._auth_error = (
+                engine._last_validation_error or "网络异常，暂时无法验证登录态"
+            )
+            engine._auth_last_attempt_at = time.time()
+            delay = engine._schedule_auth_retry(initial=True)
+            log(
+                "登录态暂时无法验证（网络异常）：%s；已保留凭据，%.0fs 后由 status 自动重试"
+                % (engine._auth_error, delay)
+            )
+    else:
+        if loaded:
+            log("cookie 文件里没有用户凭据，转为匿名会话")
+        if not engine._try_anonymous(force=True):
+            log("匿名登录失败（网络异常），稍后自动重试")
     snap = engine.snapshot()
-    if loaded and not valid:
-        log("已有 cookie 已失效，已降级为匿名（cookie 文件保留，登录成功后会覆盖）")
     return snap
 
 

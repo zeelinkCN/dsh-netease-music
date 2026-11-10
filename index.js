@@ -122,6 +122,7 @@ class Bridge {
     this.pending = new Map()
     this.restarts = 0
     this.lastExit = null
+    this.generation = 0
   }
 
   get alive() {
@@ -138,72 +139,83 @@ class Bridge {
     if (!existsSync(this.python)) return Promise.reject(new PluginError(ERR_ENGINE_MISSING, 'ENGINE_MISSING'))
     if (!existsSync(this.script)) return Promise.reject(new PluginError('引擎脚本缺失：' + this.script, 'ENGINE_MISSING'))
 
-    this.starting = new Promise((resolve, reject) => {
-      let settled = false
-      const settleOk = () => {
-        if (settled) return
-        settled = true
-        this.starting = null
-        resolve()
-      }
-      const settleErr = (err) => {
-        if (settled) return
-        settled = true
-        this.starting = null
-        reject(err)
-      }
-      const timer = setTimeout(
-        () => settleErr(new PluginError('网易云数据引擎启动超时（网络或依赖异常）', 'BRIDGE')),
-        45_000,
-      )
+    const generation = ++this.generation
+    let resolveStart
+    let rejectStart
+    let settled = false
+    const starting = new Promise((resolve, reject) => {
+      resolveStart = resolve
+      rejectStart = reject
+    })
+    this.starting = starting
+    const settleOk = () => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      if (this.generation === generation && this.starting === starting) this.starting = null
+      resolveStart()
+    }
+    const settleErr = (err) => {
+      if (settled) return
+      settled = true
+      if (this.generation === generation && this.starting === starting) this.starting = null
+      rejectStart(err)
+    }
+    const timer = setTimeout(
+      () => settleErr(new PluginError('网易云数据引擎启动超时（网络或依赖异常）', 'BRIDGE')),
+      45_000,
+    )
 
-      let child
-      try {
-        child = spawn(this.python, [this.script], {
-          cwd: join(ROOT, 'server'),
-          env: {
-            ...process.env,
-            PYTHONUNBUFFERED: '1',
-            PYTHONIOENCODING: 'utf-8',
-            NETEASE_COOKIE_FILE: this.cookieFile,
-          },
-          stdio: ['pipe', 'pipe', 'pipe'],
-        })
-      } catch (err) {
-        clearTimeout(timer)
-        settleErr(new PluginError(`无法启动数据引擎：${err?.message ?? err}`, 'BRIDGE'))
-        return
-      }
-      this.child = child
-      this.ready = false
-      this.buffer = ''
-      this.lastExit = null
+    let child
+    try {
+      child = spawn(this.python, [this.script], {
+        cwd: join(ROOT, 'server'),
+        env: {
+          ...process.env,
+          PYTHONUNBUFFERED: '1',
+          PYTHONIOENCODING: 'utf-8',
+          NETEASE_COOKIE_FILE: this.cookieFile,
+        },
+        stdio: ['pipe', 'pipe', 'pipe'],
+      })
+    } catch (err) {
+      clearTimeout(timer)
+      settleErr(new PluginError(`无法启动数据引擎：${err?.message ?? err}`, 'BRIDGE'))
+      return starting
+    }
+    this.child = child
+    this.ready = false
+    this.buffer = ''
+    this.lastExit = null
 
-      child.stdout.setEncoding('utf8')
-      child.stdout.on('data', (chunk) => this.#onData(chunk, settleOk, settleErr))
-      child.stderr.setEncoding('utf8')
-      child.stderr.on('data', (chunk) => {
-        const text = String(chunk).trim()
-        if (text) log('[engine]', text.slice(0, 2000))
-      })
-      child.on('error', (err) => {
-        clearTimeout(timer)
-        this.#failAll(err)
-        settleErr(new PluginError(`数据引擎进程错误：${err?.message ?? err}`, 'BRIDGE'))
-      })
-      child.on('exit', (code, signal) => {
-        clearTimeout(timer)
+    child.stdout.setEncoding('utf8')
+    child.stdout.on('data', (chunk) => {
+      if (this.generation !== generation || this.child !== child) return
+      this.#onData(chunk, settleOk, settleErr)
+    })
+    child.stderr.setEncoding('utf8')
+    child.stderr.on('data', (chunk) => {
+      const text = String(chunk).trim()
+      if (text) log('[engine]', text.slice(0, 2000))
+    })
+    child.on('error', (err) => {
+      clearTimeout(timer)
+      if (this.generation === generation && this.child === child) this.#failAll(err)
+      settleErr(new PluginError(`数据引擎进程错误：${err?.message ?? err}`, 'BRIDGE'))
+    })
+    child.on('exit', (code, signal) => {
+      clearTimeout(timer)
+      if (this.generation === generation && this.child === child) {
         this.child = null
         this.ready = false
-        this.starting = null
         this.lastExit = `code=${code} signal=${signal ?? ''}`
         log('数据引擎退出', this.lastExit)
         this.#failAll(new PluginError('数据引擎已退出，请重试', 'BRIDGE'))
-        settleErr(new PluginError('数据引擎启动失败（进程提前退出）', 'BRIDGE'))
-      })
-      child.stdin.on('error', (err) => log('引擎 stdin 错误', String(err?.message ?? err)))
+      }
+      settleErr(new PluginError('数据引擎启动失败（进程提前退出）', 'BRIDGE'))
     })
-    return this.starting
+    child.stdin.on('error', (err) => log('引擎 stdin 错误', String(err?.message ?? err)))
+    return starting
   }
 
   #onData(chunk, settleOk, settleErr) {
@@ -280,6 +292,7 @@ class Bridge {
 
   stop() {
     const child = this.child
+    this.generation += 1
     this.child = null
     this.ready = false
     this.starting = null
@@ -311,23 +324,29 @@ class Bridge {
 function createCache() {
   const store = new Map()
   const inflight = new Map()
+  let generation = 0
   return {
     async wrap(key, ttlMs, factory) {
       const hit = store.get(key)
       if (hit && Date.now() - hit.at < ttlMs) return hit.value
       if (inflight.has(key)) return inflight.get(key)
+      const taskGeneration = generation
       const task = Promise.resolve()
         .then(factory)
         .then((value) => {
-          store.set(key, { at: Date.now(), value })
+          if (generation === taskGeneration) store.set(key, { at: Date.now(), value })
           return value
         })
-        .finally(() => inflight.delete(key))
+        .finally(() => {
+          if (inflight.get(key) === task) inflight.delete(key)
+        })
       inflight.set(key, task)
       return task
     },
     clear() {
+      generation += 1
       store.clear()
+      inflight.clear()
     },
     get size() {
       return store.size
@@ -374,7 +393,44 @@ export function apply(ctx) {
   const bridge = new Bridge({ python: PYTHON, script: BRIDGE, cookieFile: COOKIE_FILE })
   /* 本地真实 HTTP 基址：App 页面跑在 dsh-app:// 自定义协议下，媒体经该协议会丢 Content-Length，
      导致 <audio> 判定不可 seek；音频需要绝对 http://127.0.0.1:<port> 地址。 */
-  let lastAuth = { authed: false, nickname: null, avatar: null, vipType: 0, userId: null, at: 0 }
+  let lastAuth = {
+    authed: false,
+    anonymous: false,
+    nickname: null,
+    avatar: null,
+    vipType: 0,
+    userId: null,
+    auth: 'unknown',
+    authPending: false,
+    authError: null,
+    at: 0,
+  }
+  const updateLastAuth = (status) => {
+    const source = status && typeof status === 'object' ? status : {}
+    const pending = source.authPending === true || source.auth === 'unverified'
+    if (pending) {
+      lastAuth = {
+        ...lastAuth,
+        auth: source.auth || 'unverified',
+        authPending: true,
+        authError: source.authError || null,
+        at: Date.now(),
+      }
+      return
+    }
+    lastAuth = {
+      authed: !!source.authed,
+      anonymous: !!source.anonymous,
+      nickname: source.nickname || null,
+      avatar: source.avatar || null,
+      vipType: Number(source.vipType || 0),
+      userId: source.userId || null,
+      auth: source.auth || (source.authed ? 'valid' : source.anonymous ? 'anonymous' : 'unknown'),
+      authPending: false,
+      authError: source.authError || null,
+      at: Date.now(),
+    }
+  }
 
   const localHttpBase = () => {
     try {
@@ -405,6 +461,8 @@ export function apply(ctx) {
     dataDir: DATA_DIR,
     onLog: (line) => log('[install]', line),
   })
+  const engineState = (install) =>
+    install.installed ? 'installed' : install.state === 'running' ? 'installing' : install.state === 'failed' ? 'failed' : 'missing'
   let loginKey = null
 
   try {
@@ -827,11 +885,12 @@ export function apply(ctx) {
   }, 'netease-music: agent tools')
 
   ctx.effect(() => {
+    let active = true
     // 引擎缺失 → 自动无感安装（用户装完插件即可用，无需命令行）
     if (!installer.isInstalled()) {
       log('未检测到数据引擎，开始自动安装…')
       installer.start().then(() => {
-        if (!installer.isInstalled()) return
+        if (!active || !installer.isInstalled()) return
         cache.clear()
         bridge.stop()
         bridge.ensure().catch((err) => log('自动安装后重连失败：', String(err?.message ?? err)))
@@ -905,15 +964,28 @@ export function apply(ctx) {
       /* 轻量登录态：不等待引擎，返回最近一次快照（页面 /status 读取失败时的兜底） */
       route(
         'auth',
-        wrap(async () => ({
-          authed: !!lastAuth.authed,
-          nickname: lastAuth.nickname,
-          avatar: lastAuth.avatar,
-          vipType: lastAuth.vipType,
-          userId: lastAuth.userId,
-          at: lastAuth.at,
-          engine: existsSync(PYTHON) ? 'installed' : 'installing',
-        })),
+        wrap(async () => {
+          const install = installer.snapshot()
+          return {
+            authed: !!lastAuth.authed,
+            anonymous: !!lastAuth.anonymous,
+            nickname: lastAuth.nickname,
+            avatar: lastAuth.avatar,
+            vipType: lastAuth.vipType,
+            userId: lastAuth.userId,
+            auth: lastAuth.auth,
+            authPending: !!lastAuth.authPending,
+            authError: lastAuth.authError,
+            at: lastAuth.at,
+            engine: engineState(install),
+            install: {
+              state: install.state,
+              phase: install.phase,
+              error: install.error,
+              installed: install.installed,
+            },
+          }
+        }),
       ),
 
       /* 真实 HTTP 基址（客户端给 <audio> 用；dsh-app:// 协议会丢 Content-Length） */
@@ -982,7 +1054,7 @@ export function apply(ctx) {
         wrap(async () => {
           const install = installer.snapshot()
           const base = {
-            engine: existsSync(PYTHON) ? 'installed' : install.state === 'running' ? 'installing' : install.state === 'failed' ? 'failed' : 'missing',
+            engine: engineState(install),
             engineDir: ENGINE_DIR,
             mcpEntry: MCP_ENTRY,
             httpBase: localHttpBase(),
@@ -997,14 +1069,7 @@ export function apply(ctx) {
           try {
             const status = await bridge.call('status', {}, { timeoutMs: 20_000 })
             try {
-              lastAuth = {
-                authed: !!(status && status.authed),
-                nickname: (status && status.nickname) || null,
-                avatar: (status && status.avatar) || null,
-                vipType: Number((status && status.vipType) || 0),
-                userId: (status && status.userId) || null,
-                at: Date.now(),
-              }
+              updateLastAuth(status)
             } catch (err) { /* ignore */ }
             return { bridge: 'ready', ...base, ...status }
           } catch (err) {
@@ -1040,6 +1105,7 @@ export function apply(ctx) {
           const data = await bridge.call('login_check', { key }, { timeoutMs: 25_000 })
           if (data?.state === 'ok') {
             invalidate()
+            updateLastAuth({ ...data, authed: true, anonymous: false, auth: 'valid' })
             log('扫码登录成功')
           }
           return data
@@ -1050,9 +1116,10 @@ export function apply(ctx) {
         'logout',
         handle(async (url, req) => {
           if (req.method && req.method !== 'POST') throw new PluginError('请用 POST 退出登录', 'INTERNAL')
-          await bridge.call('logout', {}, { timeoutMs: 20_000 }).catch(() => null)
+          const data = await bridge.call('logout', {}, { timeoutMs: 20_000 })
           invalidate()
-          return { authed: false }
+          updateLastAuth({ authed: false, anonymous: true, auth: 'logged_out' })
+          return data
         }),
       ),
 
@@ -1198,7 +1265,7 @@ export function apply(ctx) {
         handle(async (url, req) => {
           if (req.method && req.method !== 'POST') throw new PluginError('请用 POST 开始安装', 'INTERNAL')
           installer.start().then(() => {
-            if (installer.isInstalled()) {
+            if (active && installer.isInstalled()) {
               cache.clear()
               loginKey = null
               bridge.stop()
@@ -1221,6 +1288,7 @@ export function apply(ctx) {
     ].map((r) => ctx.webServer.register(r))
 
     return () => {
+      active = false
       routes.forEach((dispose) => {
         try {
           dispose()
